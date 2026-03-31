@@ -95,6 +95,31 @@ server.tool(
 );
 
 server.tool(
+  'send_reaction',
+  'React to a message with an emoji. Use message IDs from the conversation context. Great for acknowledging messages, confirming actions, or showing appreciation.',
+  {
+    message_id: z.string().describe('The message ID to react to (from the id attribute in <message> tags)'),
+    participant: z.string().optional().describe('The sender JID of the message author (required for group chats)'),
+    emoji: z.string().describe('Emoji to react with (e.g., "👍", "❤️", "✅", "🔥", "😂")'),
+  },
+  async (args) => {
+    const data = {
+      type: 'reaction',
+      chatJid,
+      messageId: args.message_id,
+      participant: args.participant || undefined,
+      emoji: args.emoji,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Reacted with ${args.emoji}` }] };
+  },
+);
+
+server.tool(
   'generate_image',
   'Generate an image from a text prompt using AI and send it to the chat. The image is generated asynchronously — it will appear in the chat shortly after you call this tool. You can continue responding while it generates.',
   {

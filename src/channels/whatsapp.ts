@@ -417,6 +417,40 @@ export class WhatsAppChannel implements Channel {
         }
       }
     });
+
+    // Inbound reactions — deliver as text messages so the agent can see them
+    this.sock.ev.on('messages.reaction', (reactions) => {
+      for (const { key, reaction } of reactions) {
+        try {
+          const rawJid = key.remoteJid;
+          if (!rawJid || rawJid === 'status@broadcast') continue;
+
+          const emoji = reaction.text || '';
+          if (!emoji) continue; // empty = reaction removed
+
+          const chatJid = rawJid;
+          const groups = this.opts.registeredGroups();
+          if (!groups[chatJid]) continue;
+
+          const senderName =
+            reaction.key?.participant?.split('@')[0] || 'unknown';
+          const reactedMsgId = reaction.key?.id || '';
+
+          this.opts.onMessage(chatJid, {
+            id: `reaction-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            chat_jid: chatJid,
+            sender: reaction.key?.participant || '',
+            sender_name: senderName,
+            content: `[Reaction: ${emoji} on message ${reactedMsgId} by ${senderName}]`,
+            timestamp: new Date().toISOString(),
+            is_from_me: false,
+            is_bot_message: false,
+          });
+        } catch (err) {
+          logger.error({ err }, 'Error processing reaction');
+        }
+      }
+    });
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -486,6 +520,29 @@ export class WhatsAppChannel implements Channel {
       logger.info({ jid, size: image.length }, 'Image sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send image');
+    }
+  }
+
+  async sendReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+    participant?: string,
+  ): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, messageId, emoji }, 'WA disconnected, reaction dropped');
+      return;
+    }
+    try {
+      await this.sock.sendMessage(jid, {
+        react: {
+          text: emoji,
+          key: { remoteJid: jid, id: messageId, participant },
+        },
+      });
+      logger.info({ jid, messageId, emoji }, 'Reaction sent');
+    } catch (err) {
+      logger.warn({ jid, messageId, emoji, err }, 'Failed to send reaction');
     }
   }
 

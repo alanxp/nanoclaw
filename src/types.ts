@@ -90,6 +90,13 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: send an image with optional caption.
   sendImage?(jid: string, image: Buffer, caption?: string): Promise<void>;
+  // Optional: react to a message with an emoji.
+  sendReaction?(
+    jid: string,
+    messageId: string,
+    emoji: string,
+    participant?: string,
+  ): Promise<void>;
   // Optional: send a document/file.
   sendDocument?(
     jid: string,

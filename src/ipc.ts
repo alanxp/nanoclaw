@@ -12,6 +12,12 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendReaction: (
+    jid: string,
+    messageId: string,
+    emoji: string,
+    participant?: string,
+  ) => Promise<void>;
   sendDocument: (
     jid: string,
     filePath: string,
@@ -137,6 +143,44 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC image generation attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'reaction' &&
+                data.chatJid &&
+                data.messageId &&
+                data.emoji
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  deps
+                    .sendReaction(
+                      data.chatJid,
+                      data.messageId,
+                      data.emoji,
+                      data.participant,
+                    )
+                    .catch((err) =>
+                      logger.error(
+                        { err, chatJid: data.chatJid, sourceGroup },
+                        'Reaction send failed',
+                      ),
+                    );
+                  logger.info(
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      emoji: data.emoji,
+                    },
+                    'IPC reaction sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC reaction attempt blocked',
                   );
                 }
               } else if (
