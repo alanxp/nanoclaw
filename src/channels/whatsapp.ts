@@ -306,9 +306,7 @@ export class WhatsAppChannel implements Channel {
               const caption = normalized.imageMessage.caption || '';
               try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                const groupDir = resolveGroupFolderPath(
-                  groups[chatJid].folder,
-                );
+                const groupDir = resolveGroupFolderPath(groups[chatJid].folder);
                 const result = await processImage(
                   buffer as Buffer,
                   groupDir,
@@ -324,17 +322,13 @@ export class WhatsAppChannel implements Channel {
             else if (normalized.stickerMessage) {
               try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                const groupDir = resolveGroupFolderPath(
-                  groups[chatJid].folder,
-                );
+                const groupDir = resolveGroupFolderPath(groups[chatJid].folder);
                 const result = await processImage(
                   buffer as Buffer,
                   groupDir,
                   '',
                 );
-                content = result
-                  ? `[Sticker] ${result.content}`
-                  : '[Sticker]';
+                content = result ? `[Sticker] ${result.content}` : '[Sticker]';
               } catch (err) {
                 logger.warn({ err, chatJid }, 'Failed to download sticker');
                 content = '[Sticker]';
@@ -345,18 +339,13 @@ export class WhatsAppChannel implements Channel {
               const caption = normalized.documentMessage.caption || '';
               try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                const groupDir = resolveGroupFolderPath(
-                  groups[chatJid].folder,
-                );
+                const groupDir = resolveGroupFolderPath(groups[chatJid].folder);
                 const attachmentsDir = path.join(groupDir, 'attachments');
                 fs.mkdirSync(attachmentsDir, { recursive: true });
                 const originalName =
                   normalized.documentMessage.fileName ||
                   `document-${Date.now()}`;
-                const safeName = originalName.replace(
-                  /[^a-zA-Z0-9._-]/g,
-                  '_',
-                );
+                const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
                 fs.writeFileSync(
                   path.join(attachmentsDir, safeName),
                   buffer as Buffer,
@@ -364,10 +353,7 @@ export class WhatsAppChannel implements Channel {
                 content = caption
                   ? `[Document: attachments/${safeName}] ${caption}`
                   : `[Document: attachments/${safeName}]`;
-                logger.info(
-                  { chatJid, document: safeName },
-                  'Document saved',
-                );
+                logger.info({ chatJid, document: safeName }, 'Document saved');
               } catch (err) {
                 logger.warn({ err, chatJid }, 'Failed to download document');
                 content = caption;

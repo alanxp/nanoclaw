@@ -19,8 +19,7 @@ const JPEG_QUALITY = 85;
  *   [Image: attachments/filename.jpg]
  *   [Sticker: attachments/filename.jpg]
  */
-const IMAGE_REF_PATTERN =
-  /\[(Image|Sticker):\s*([\w./-]+)\]/g;
+const IMAGE_REF_PATTERN = /\[(Image|Sticker):\s*([\w./-]+)\]/g;
 
 export interface ImageAttachment {
   relativePath: string;
@@ -78,7 +77,9 @@ export async function processImage(
  * Scan messages for [Image: ...] and [Sticker: ...] references
  * and return the list of image attachments for multimodal input.
  */
-export function parseImageReferences(messages: NewMessage[]): ImageAttachment[] {
+export function parseImageReferences(
+  messages: NewMessage[],
+): ImageAttachment[] {
   const attachments: ImageAttachment[] = [];
 
   for (const msg of messages) {
