@@ -1,0 +1,112 @@
+#!/bin/bash
+# pdf-reader — Extract text from PDF files using poppler-utils
+# Usage: pdf-reader <command> [args...]
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: pdf-reader <command> [args...]
+
+Commands:
+  extract <file> [--layout] [--pages N-M]  Extract text from a PDF
+  fetch <url> [filename]                    Download and extract a PDF from URL
+  info <file>                               Show PDF metadata
+  list                                      List all PDFs recursively
+
+Examples:
+  pdf-reader extract report.pdf
+  pdf-reader extract report.pdf --layout --pages 1-5
+  pdf-reader fetch https://example.com/doc.pdf
+  pdf-reader info report.pdf
+  pdf-reader list
+EOF
+  exit 1
+}
+
+cmd_extract() {
+  local file="$1"; shift
+  local layout_flag=""
+  local pages_flag=""
+
+  if [ ! -f "$file" ]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --layout) layout_flag="-layout"; shift ;;
+      --pages)
+        shift
+        if [ $# -eq 0 ]; then echo "Error: --pages requires a value (e.g., 1-5)" >&2; exit 1; fi
+        local range="$1"
+        local first="${range%-*}"
+        local last="${range#*-}"
+        pages_flag="-f $first -l $last"
+        shift
+        ;;
+      *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  # shellcheck disable=SC2086
+  pdftotext $layout_flag $pages_flag "$file" -
+}
+
+cmd_fetch() {
+  local url="$1"
+  local filename="${2:-$(basename "$url")}"
+
+  # Ensure .pdf extension
+  [[ "$filename" == *.pdf ]] || filename="${filename}.pdf"
+
+  local tmpfile="/tmp/$filename"
+  curl -sL -o "$tmpfile" "$url"
+
+  # Validate PDF header
+  if ! head -c 4 "$tmpfile" | grep -q '%PDF'; then
+    echo "Error: Downloaded file is not a valid PDF" >&2
+    rm -f "$tmpfile"
+    exit 1
+  fi
+
+  echo "--- PDF Info ---"
+  pdfinfo "$tmpfile" 2>/dev/null || true
+  echo ""
+  echo "--- Extracted Text ---"
+  pdftotext "$tmpfile" -
+  rm -f "$tmpfile"
+}
+
+cmd_info() {
+  local file="$1"
+
+  if [ ! -f "$file" ]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  pdfinfo "$file" 2>/dev/null || true
+  echo "File size: $(du -h "$file" | cut -f1)"
+}
+
+cmd_list() {
+  find . -name '*.pdf' -type f | while read -r f; do
+    local pages
+    pages=$(pdfinfo "$f" 2>/dev/null | grep '^Pages:' | awk '{print $2}') || pages="?"
+    local size
+    size=$(du -h "$f" | cut -f1)
+    echo "$f  (${pages} pages, ${size})"
+  done
+}
+
+[ $# -lt 1 ] && usage
+
+case "$1" in
+  extract) shift; [ $# -lt 1 ] && usage; cmd_extract "$@" ;;
+  fetch)   shift; [ $# -lt 1 ] && usage; cmd_fetch "$@" ;;
+  info)    shift; [ $# -lt 1 ] && usage; cmd_info "$@" ;;
+  list)    shift; cmd_list ;;
+  *)       usage ;;
+esac

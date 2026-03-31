@@ -1,0 +1,138 @@
+#!/bin/bash
+# office-reader — Extract content from Excel and Word files
+# Uses xlsx (npm) for spreadsheets and mammoth (npm) for .docx
+# Usage: office-reader <command> [args...]
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: office-reader <command> [args...]
+
+Commands:
+  extract <file> [--sheet <name>] [--json]  Extract content from file
+  info <file>                               Show file metadata
+  list                                      List all Office files recursively
+
+Supported formats: .xls, .xlsx, .docx
+
+Examples:
+  office-reader extract report.xlsx
+  office-reader extract report.xlsx --sheet "Sales" --json
+  office-reader extract document.docx
+  office-reader info spreadsheet.xlsx
+  office-reader list
+EOF
+  exit 1
+}
+
+is_excel() {
+  local file="$1"
+  [[ "$file" == *.xls || "$file" == *.xlsx ]]
+}
+
+is_word() {
+  local file="$1"
+  [[ "$file" == *.docx ]]
+}
+
+cmd_extract() {
+  local file="$1"; shift
+  local sheet=""
+  local json_flag=""
+
+  if [ ! -f "$file" ]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --sheet)
+        shift
+        if [ $# -eq 0 ]; then echo "Error: --sheet requires a name" >&2; exit 1; fi
+        sheet="$1"; shift
+        ;;
+      --json) json_flag="1"; shift ;;
+      *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if is_excel "$file"; then
+    node -e "
+      const XLSX = require('xlsx');
+      const wb = XLSX.readFile('$file');
+      const sheetName = '${sheet}' || wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+      if (!ws) { console.error('Sheet not found: ' + sheetName); process.exit(1); }
+      if ('${json_flag}') {
+        const data = XLSX.utils.sheet_to_json(ws);
+        console.log(JSON.stringify(data, null, 2));
+      } else {
+        console.log(XLSX.utils.sheet_to_csv(ws));
+      }
+    "
+  elif is_word "$file"; then
+    node -e "
+      const mammoth = require('mammoth');
+      mammoth.extractRawText({ path: '$file' })
+        .then(result => console.log(result.value))
+        .catch(err => { console.error(err.message); process.exit(1); });
+    "
+  else
+    echo "Error: Unsupported file type. Supported: .xls, .xlsx, .docx" >&2
+    exit 1
+  fi
+}
+
+cmd_info() {
+  local file="$1"
+
+  if [ ! -f "$file" ]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  local size
+  size=$(du -h "$file" | cut -f1)
+
+  if is_excel "$file"; then
+    node -e "
+      const XLSX = require('xlsx');
+      const wb = XLSX.readFile('$file');
+      console.log('Type: Excel');
+      console.log('Sheets: ' + wb.SheetNames.join(', '));
+      for (const name of wb.SheetNames) {
+        const ws = wb.Sheets[name];
+        const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+        const rows = range.e.r - range.s.r + 1;
+        const cols = range.e.c - range.s.c + 1;
+        console.log('  ' + name + ': ' + rows + ' rows x ' + cols + ' cols');
+      }
+    "
+    echo "File size: $size"
+  elif is_word "$file"; then
+    echo "Type: Word (.docx)"
+    echo "File size: $size"
+  else
+    echo "Error: Unsupported file type" >&2
+    exit 1
+  fi
+}
+
+cmd_list() {
+  find . \( -name '*.xls' -o -name '*.xlsx' -o -name '*.docx' \) -type f | while read -r f; do
+    local size
+    size=$(du -h "$f" | cut -f1)
+    echo "$f  ($size)"
+  done
+}
+
+[ $# -lt 1 ] && usage
+
+case "$1" in
+  extract) shift; [ $# -lt 1 ] && usage; cmd_extract "$@" ;;
+  info)    shift; [ $# -lt 1 ] && usage; cmd_info "$@" ;;
+  list)    shift; cmd_list ;;
+  *)       usage ;;
+esac

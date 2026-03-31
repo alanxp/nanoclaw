@@ -6,12 +6,18 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendDocument: (
+    jid: string,
+    filePath: string,
+    filename: string,
+    caption?: string,
+  ) => Promise<void>;
   generateAndSendImage: (
     jid: string,
     prompt: string,
@@ -132,6 +138,66 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC image generation attempt blocked',
                   );
+                }
+              } else if (
+                data.type === 'document' &&
+                data.chatJid &&
+                data.filename
+              ) {
+                // Validate filename to prevent path traversal
+                if (
+                  data.filename.includes('/') ||
+                  data.filename.includes('..')
+                ) {
+                  logger.warn(
+                    { filename: data.filename, sourceGroup },
+                    'Path traversal attempt in document IPC blocked',
+                  );
+                } else {
+                  const targetGroup = registeredGroups[data.chatJid];
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    const folder = targetGroup?.folder || sourceGroup;
+                    const absPath = path.join(
+                      resolveGroupFolderPath(folder),
+                      data.filename,
+                    );
+                    if (fs.existsSync(absPath)) {
+                      deps
+                        .sendDocument(
+                          data.chatJid,
+                          absPath,
+                          data.originalName || data.filename,
+                          data.caption || '',
+                        )
+                        .catch((err) =>
+                          logger.error(
+                            { err, chatJid: data.chatJid, sourceGroup },
+                            'Document send failed',
+                          ),
+                        );
+                      logger.info(
+                        {
+                          chatJid: data.chatJid,
+                          filename: data.filename,
+                          sourceGroup,
+                        },
+                        'IPC document dispatched',
+                      );
+                    } else {
+                      logger.warn(
+                        { filename: data.filename, folder },
+                        'Document file not found',
+                      );
+                    }
+                  } else {
+                    logger.warn(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'Unauthorized IPC document attempt blocked',
+                    );
+                  }
                 }
               }
               fs.unlinkSync(filePath);

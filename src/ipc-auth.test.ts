@@ -53,6 +53,7 @@ beforeEach(() => {
 
   deps = {
     sendMessage: async () => {},
+    sendDocument: async () => {},
     generateAndSendImage: async () => {},
     registeredGroups: () => groups,
     registerGroup: (jid, group) => {

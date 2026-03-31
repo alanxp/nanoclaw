@@ -29,6 +29,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
 }
 
 interface ContainerOutput {
@@ -49,9 +50,11 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type MessageContent = string | Array<{ type: string; [key: string]: unknown }>;
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: MessageContent };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -73,6 +76,16 @@ class MessageStream {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  pushMultimodal(content: Array<{ type: string; [key: string]: unknown }>): void {
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -340,7 +353,39 @@ async function runQuery(
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+
+  // Build multimodal message if images are attached, otherwise plain text
+  if (containerInput.imageAttachments?.length) {
+    const contentBlocks: Array<{ type: string; [key: string]: unknown }> = [
+      { type: 'text', text: prompt },
+    ];
+    for (const img of containerInput.imageAttachments) {
+      const imgPath = path.join('/workspace/group', img.relativePath);
+      if (!fs.existsSync(imgPath)) continue;
+      const raw = fs.readFileSync(imgPath);
+      if (raw.length < 1024) continue;
+      // Validate JPEG or PNG magic bytes
+      const isJpeg = raw[0] === 0xff && raw[1] === 0xd8;
+      const isPng = raw[0] === 0x89 && raw[1] === 0x50;
+      if (!isJpeg && !isPng) continue;
+      contentBlocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: img.mediaType,
+          data: raw.toString('base64'),
+        },
+      });
+    }
+    if (contentBlocks.length > 1) {
+      log(`Sending multimodal message with ${contentBlocks.length - 1} image(s)`);
+      stream.pushMultimodal(contentBlocks);
+    } else {
+      stream.push(prompt);
+    }
+  } else {
+    stream.push(prompt);
+  }
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;

@@ -6,6 +6,7 @@ import {
   makeWASocket,
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
@@ -28,6 +29,8 @@ import {
   ASSISTANT_NAME,
   STORE_DIR,
 } from '../config.js';
+import { processImage } from '../image.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import {
   getLastGroupSync,
   getMessageContentById,
@@ -290,12 +293,90 @@ export class WhatsAppChannel implements Channel {
           // Only deliver full message for registered groups
           const groups = this.opts.registeredGroups();
           if (groups[chatJid]) {
-            let content =
-              normalized.conversation ||
-              normalized.extendedTextMessage?.text ||
-              normalized.imageMessage?.caption ||
-              normalized.videoMessage?.caption ||
-              '';
+            let content = '';
+
+            // Text messages
+            if (normalized.conversation) {
+              content = normalized.conversation;
+            } else if (normalized.extendedTextMessage?.text) {
+              content = normalized.extendedTextMessage.text;
+            }
+            // Image messages — download and process for vision
+            else if (normalized.imageMessage) {
+              const caption = normalized.imageMessage.caption || '';
+              try {
+                const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                const groupDir = resolveGroupFolderPath(
+                  groups[chatJid].folder,
+                );
+                const result = await processImage(
+                  buffer as Buffer,
+                  groupDir,
+                  caption,
+                );
+                content = result ? result.content : caption;
+              } catch (err) {
+                logger.warn({ err, chatJid }, 'Failed to download image');
+                content = caption;
+              }
+            }
+            // Sticker messages — process for vision
+            else if (normalized.stickerMessage) {
+              try {
+                const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                const groupDir = resolveGroupFolderPath(
+                  groups[chatJid].folder,
+                );
+                const result = await processImage(
+                  buffer as Buffer,
+                  groupDir,
+                  '',
+                );
+                content = result
+                  ? `[Sticker] ${result.content}`
+                  : '[Sticker]';
+              } catch (err) {
+                logger.warn({ err, chatJid }, 'Failed to download sticker');
+                content = '[Sticker]';
+              }
+            }
+            // Document messages — save for agent to read with pdf-reader / office-reader
+            else if (normalized.documentMessage) {
+              const caption = normalized.documentMessage.caption || '';
+              try {
+                const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                const groupDir = resolveGroupFolderPath(
+                  groups[chatJid].folder,
+                );
+                const attachmentsDir = path.join(groupDir, 'attachments');
+                fs.mkdirSync(attachmentsDir, { recursive: true });
+                const originalName =
+                  normalized.documentMessage.fileName ||
+                  `document-${Date.now()}`;
+                const safeName = originalName.replace(
+                  /[^a-zA-Z0-9._-]/g,
+                  '_',
+                );
+                fs.writeFileSync(
+                  path.join(attachmentsDir, safeName),
+                  buffer as Buffer,
+                );
+                content = caption
+                  ? `[Document: attachments/${safeName}] ${caption}`
+                  : `[Document: attachments/${safeName}]`;
+                logger.info(
+                  { chatJid, document: safeName },
+                  'Document saved',
+                );
+              } catch (err) {
+                logger.warn({ err, chatJid }, 'Failed to download document');
+                content = caption;
+              }
+            }
+            // Video captions (no vision processing yet)
+            else if (normalized.videoMessage?.caption) {
+              content = normalized.videoMessage.caption;
+            }
 
             // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
             // instead of the display name. Normalize to @AssistantName for trigger matching.
@@ -419,6 +500,46 @@ export class WhatsAppChannel implements Channel {
       logger.info({ jid, size: image.length }, 'Image sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send image');
+    }
+  }
+
+  async sendDocument(
+    jid: string,
+    filePath: string,
+    filename: string,
+    caption?: string,
+  ): Promise<void> {
+    const prefixedCaption = caption
+      ? ASSISTANT_HAS_OWN_NUMBER
+        ? caption
+        : `${ASSISTANT_NAME}: ${caption}`
+      : undefined;
+
+    if (!this.connected) {
+      logger.warn(
+        { jid, filename },
+        'WA disconnected, document cannot be queued — dropping',
+      );
+      return;
+    }
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const sent = await this.sock.sendMessage(jid, {
+        document: buffer,
+        fileName: filename,
+        caption: prefixedCaption,
+        mimetype: 'application/octet-stream',
+      });
+      if (sent?.key?.id && sent.message) {
+        this.sentMessageCache.set(sent.key.id, sent.message);
+        if (this.sentMessageCache.size > 256) {
+          const oldest = this.sentMessageCache.keys().next().value!;
+          this.sentMessageCache.delete(oldest);
+        }
+      }
+      logger.info({ jid, filename }, 'Document sent');
+    } catch (err) {
+      logger.error({ jid, filename, err }, 'Failed to send document');
     }
   }
 

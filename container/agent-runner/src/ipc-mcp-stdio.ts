@@ -41,12 +41,44 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can also send documents/files by providing document_path.",
   {
-    text: z.string().describe('The message text to send'),
+    text: z.string().describe('The message text to send. When sending a document, this is used as the caption (can be empty).'),
+    document_path: z.string().optional().describe('Path to a document file to send (e.g., /workspace/group/report.pdf). When provided, sends the file as a document attachment.'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
   },
   async (args) => {
+    // Document sending
+    if (args.document_path) {
+      const resolved = path.resolve(args.document_path);
+      const groupDir = '/workspace/group';
+      // Copy file to group directory if not already there (host accesses via mount)
+      let filename = path.basename(resolved);
+      const targetPath = path.join(groupDir, filename);
+      if (resolved !== targetPath) {
+        if (!fs.existsSync(resolved)) {
+          return {
+            content: [{ type: 'text' as const, text: `File not found: ${args.document_path}` }],
+            isError: true,
+          };
+        }
+        fs.copyFileSync(resolved, targetPath);
+      }
+
+      writeIpcFile(MESSAGES_DIR, {
+        type: 'document',
+        chatJid,
+        filename,
+        originalName: filename,
+        caption: args.text || '',
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+
+      return { content: [{ type: 'text' as const, text: 'Document queued for delivery.' }] };
+    }
+
+    // Regular text message
     const data: Record<string, string | undefined> = {
       type: 'message',
       chatJid,
