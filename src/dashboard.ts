@@ -49,7 +49,8 @@ function getServiceStatus(): {
       'launchctl list com.nanoclaw 2>/dev/null || echo "not_found"',
       { encoding: 'utf-8', timeout: 5000 },
     );
-    if (out.includes('not_found')) return { running: false, pid: null, uptime: null };
+    if (out.includes('not_found'))
+      return { running: false, pid: null, uptime: null };
     const pidMatch = out.match(/"PID"\s*=\s*(\d+)/);
     const pid = pidMatch ? parseInt(pidMatch[1], 10) : null;
     let uptime: string | null = null;
@@ -78,13 +79,34 @@ function getChannelStatus(): Array<{
   account: string | null;
 }> {
   const LOG_PATH = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
-  const channels = ['whatsapp', 'telegram', 'outlook', 'gmail', 'discord', 'slack'];
-  const status: Record<string, { connected: boolean; lastEvent: string | null; lastEventTime: string | null; account: string | null }> = {};
+  const channels = [
+    'whatsapp',
+    'telegram',
+    'outlook',
+    'gmail',
+    'discord',
+    'slack',
+  ];
+  const status: Record<
+    string,
+    {
+      connected: boolean;
+      lastEvent: string | null;
+      lastEventTime: string | null;
+      account: string | null;
+    }
+  > = {};
   for (const ch of channels) {
-    status[ch] = { connected: false, lastEvent: null, lastEventTime: null, account: null };
+    status[ch] = {
+      connected: false,
+      lastEvent: null,
+      lastEventTime: null,
+      account: null,
+    };
   }
 
-  if (!fs.existsSync(LOG_PATH)) return channels.map(name => ({ name, ...status[name] }));
+  if (!fs.existsSync(LOG_PATH))
+    return channels.map((name) => ({ name, ...status[name] }));
 
   try {
     // Read last 2000 lines of log for channel events
@@ -110,7 +132,11 @@ function getChannelStatus(): Array<{
         slack: ['slack channel connected'],
       };
       const stopPatterns: Record<string, string[]> = {
-        whatsapp: ['whatsapp channel stopped', 'whatsapp disconnected', 'connection closed'],
+        whatsapp: [
+          'whatsapp channel stopped',
+          'whatsapp disconnected',
+          'connection closed',
+        ],
         telegram: ['telegram channel stopped', 'telegram bot stopped'],
         outlook: ['outlook channel stopped'],
         gmail: ['gmail channel stopped'],
@@ -119,11 +145,26 @@ function getChannelStatus(): Array<{
       };
 
       for (const ch of channels) {
-        if (connectPatterns[ch]?.some(p => lineLower.includes(p))) {
-          status[ch] = { connected: true, lastEvent: 'connected', lastEventTime: time, account: status[ch].account };
-        } else if (stopPatterns[ch]?.some(p => lineLower.includes(p))) {
-          status[ch] = { connected: false, lastEvent: 'stopped', lastEventTime: time, account: status[ch].account };
-        } else if (lineLower.includes(ch.toLowerCase()) && (lineLower.includes('delivered') || lineLower.includes('message sent') || lineLower.includes('message stored'))) {
+        if (connectPatterns[ch]?.some((p) => lineLower.includes(p))) {
+          status[ch] = {
+            connected: true,
+            lastEvent: 'connected',
+            lastEventTime: time,
+            account: status[ch].account,
+          };
+        } else if (stopPatterns[ch]?.some((p) => lineLower.includes(p))) {
+          status[ch] = {
+            connected: false,
+            lastEvent: 'stopped',
+            lastEventTime: time,
+            account: status[ch].account,
+          };
+        } else if (
+          lineLower.includes(ch.toLowerCase()) &&
+          (lineLower.includes('delivered') ||
+            lineLower.includes('message sent') ||
+            lineLower.includes('message stored'))
+        ) {
           // Any message activity proves the channel is connected
           status[ch].connected = true;
           status[ch].lastEvent = 'active';
@@ -139,14 +180,24 @@ function getChannelStatus(): Array<{
   try {
     const logPath = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
     if (fs.existsSync(logPath)) {
-      const logTail = execSync(`tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`, {
-        encoding: 'utf-8',
-        timeout: 5000,
-      });
+      const logTail = execSync(
+        `tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`,
+        {
+          encoding: 'utf-8',
+          timeout: 5000,
+        },
+      );
 
       // Helper: find last match in string
       const lastMatch = (text: string, re: RegExp): RegExpMatchArray | null => {
-        const matches = [...text.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))];
+        const matches = [
+          ...text.matchAll(
+            new RegExp(
+              re.source,
+              re.flags.includes('g') ? re.flags : re.flags + 'g',
+            ),
+          ),
+        ];
         return matches.length > 0 ? matches[matches.length - 1] : null;
       };
 
@@ -155,11 +206,17 @@ function getChannelStatus(): Array<{
       if (tgMatch) status['telegram'].account = `@${tgMatch[1]}`;
 
       // Outlook: email from connection log
-      const olMatch = lastMatch(logTail, /Outlook channel connected[\s\S]*?email.*?:\s*"([^"]+)"/);
+      const olMatch = lastMatch(
+        logTail,
+        /Outlook channel connected[\s\S]*?email.*?:\s*"([^"]+)"/,
+      );
       if (olMatch) status['outlook'].account = olMatch[1];
 
       // Gmail: email from connection log
-      const gmMatch = lastMatch(logTail, /Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/);
+      const gmMatch = lastMatch(
+        logTail,
+        /Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/,
+      );
       if (gmMatch) status['gmail'].account = gmMatch[1];
 
       // WhatsApp: phone number from connection
@@ -173,34 +230,63 @@ function getChannelStatus(): Array<{
   // Fall back to .env / credential files for account info
   try {
     const envPath2 = path.resolve(PROJECT_ROOT, '.env');
-    const env2 = fs.existsSync(envPath2) ? fs.readFileSync(envPath2, 'utf-8') : '';
+    const env2 = fs.existsSync(envPath2)
+      ? fs.readFileSync(envPath2, 'utf-8')
+      : '';
     const msEmail = env2.match(/MS_USER_EMAIL=(.+)/)?.[1]?.trim();
-    if (msEmail && !status['outlook'].account) status['outlook'].account = msEmail;
-  } catch { /* */ }
+    if (msEmail && !status['outlook'].account)
+      status['outlook'].account = msEmail;
+  } catch {
+    /* */
+  }
 
   try {
-    const gmailCreds = path.join(os.homedir(), '.gmail-mcp', 'credentials.json');
+    const gmailCreds = path.join(
+      os.homedir(),
+      '.gmail-mcp',
+      'credentials.json',
+    );
     if (fs.existsSync(gmailCreds) && !status['gmail'].account) {
       const creds = JSON.parse(fs.readFileSync(gmailCreds, 'utf-8'));
       if (creds.email) status['gmail'].account = creds.email;
     }
-  } catch { /* */ }
+  } catch {
+    /* */
+  }
 
   // Also check for .env credentials to determine which channels are configured
   const envPath = path.resolve(PROJECT_ROOT, '.env');
   let envContent = '';
-  try { envContent = fs.readFileSync(envPath, 'utf-8'); } catch { /* no .env */ }
+  try {
+    envContent = fs.readFileSync(envPath, 'utf-8');
+  } catch {
+    /* no .env */
+  }
 
   const configured = new Set<string>();
   if (envContent.includes('MS_TENANT_ID')) configured.add('outlook');
-  if (envContent.includes('TELEGRAM_BOT_TOKEN') || fs.existsSync(path.resolve(PROJECT_ROOT, '.claude/channels/telegram/.env'))) configured.add('telegram');
-  if (fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))) configured.add('gmail');
+  if (
+    envContent.includes('TELEGRAM_BOT_TOKEN') ||
+    fs.existsSync(path.resolve(PROJECT_ROOT, '.claude/channels/telegram/.env'))
+  )
+    configured.add('telegram');
+  if (fs.existsSync(path.join(os.homedir(), '.gmail-mcp')))
+    configured.add('gmail');
   // WhatsApp auth store
-  if (fs.existsSync(path.resolve(PROJECT_ROOT, 'store', 'auth')) || fs.existsSync(path.resolve(PROJECT_ROOT, 'auth_info_baileys'))) configured.add('whatsapp');
+  if (
+    fs.existsSync(path.resolve(PROJECT_ROOT, 'store', 'auth')) ||
+    fs.existsSync(path.resolve(PROJECT_ROOT, 'auth_info_baileys'))
+  )
+    configured.add('whatsapp');
 
   return channels
-    .filter(name => configured.has(name) || status[name].connected || status[name].lastEvent)
-    .map(name => ({ name, ...status[name] }));
+    .filter(
+      (name) =>
+        configured.has(name) ||
+        status[name].connected ||
+        status[name].lastEvent,
+    )
+    .map((name) => ({ name, ...status[name] }));
 }
 
 function getGoogleStatus(): {
@@ -212,7 +298,13 @@ function getGoogleStatus(): {
 } {
   const credsPath = path.join(os.homedir(), '.gmail-mcp', 'credentials.json');
   if (!fs.existsSync(credsPath)) {
-    return { connected: false, account: null, scopes: [], tokenExpiry: null, tokenValid: false };
+    return {
+      connected: false,
+      account: null,
+      scopes: [],
+      tokenExpiry: null,
+      tokenValid: false,
+    };
   }
 
   try {
@@ -234,10 +326,18 @@ function getGoogleStatus(): {
       try {
         const logPath = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
         if (fs.existsSync(logPath)) {
-          const logTail = execSync(`tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`, {
-            encoding: 'utf-8', timeout: 5000,
-          });
-          const matches = [...logTail.matchAll(/Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/g)];
+          const logTail = execSync(
+            `tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`,
+            {
+              encoding: 'utf-8',
+              timeout: 5000,
+            },
+          );
+          const matches = [
+            ...logTail.matchAll(
+              /Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/g,
+            ),
+          ];
           if (matches.length > 0) account = matches[matches.length - 1][1];
         }
       } catch {}
@@ -251,7 +351,13 @@ function getGoogleStatus(): {
       tokenValid,
     };
   } catch {
-    return { connected: false, account: null, scopes: [], tokenExpiry: null, tokenValid: false };
+    return {
+      connected: false,
+      account: null,
+      scopes: [],
+      tokenExpiry: null,
+      tokenValid: false,
+    };
   }
 }
 
@@ -270,7 +376,13 @@ function getNotionStatus(): {
     if (match) notionKey = match[1];
   } catch {}
 
-  if (!notionKey) return { connected: false, workspace: null, botName: null, pageCount: null };
+  if (!notionKey)
+    return {
+      connected: false,
+      workspace: null,
+      botName: null,
+      pageCount: null,
+    };
 
   // Test the key by calling /v1/users/me
   try {
@@ -279,7 +391,13 @@ function getNotionStatus(): {
       { encoding: 'utf-8', timeout: 8000 },
     );
     const me = JSON.parse(meResult);
-    if (me.object !== 'user') return { connected: false, workspace: null, botName: null, pageCount: null };
+    if (me.object !== 'user')
+      return {
+        connected: false,
+        workspace: null,
+        botName: null,
+        pageCount: null,
+      };
 
     const workspace = me.bot?.workspace_name || null;
     const botName = me.name || null;
@@ -300,12 +418,17 @@ function getNotionStatus(): {
       );
       const full = JSON.parse(fullSearch);
       pageCount = full.results?.length || 0;
-      if (full.has_more) pageCount = pageCount + '+' as any; // will render as "100+"
+      if (full.has_more) pageCount = (pageCount + '+') as any; // will render as "100+"
     } catch {}
 
     return { connected: true, workspace, botName, pageCount };
   } catch {
-    return { connected: false, workspace: null, botName: null, pageCount: null };
+    return {
+      connected: false,
+      workspace: null,
+      botName: null,
+      pageCount: null,
+    };
   }
 }
 
@@ -316,16 +439,22 @@ function getRecentErrors(): Array<{ time: string; message: string }> {
 
   try {
     const tail = execSync(`tail -1000 ${JSON.stringify(logPath)} 2>/dev/null`, {
-      encoding: 'utf-8', timeout: 5000,
+      encoding: 'utf-8',
+      timeout: 5000,
     });
     for (const line of tail.split('\n')) {
       if (!line.includes('ERROR') && !line.includes('WARN')) continue;
       const timeMatch = line.match(/\[(\d{2}:\d{2}:\d{2}\.\d{3})\]/);
       // Strip ANSI codes
       const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
-      const msgMatch = clean.match(/(?:ERROR|WARN)\s*(?:\([^)]*\))?\s*:\s*(.+)/);
+      const msgMatch = clean.match(
+        /(?:ERROR|WARN)\s*(?:\([^)]*\))?\s*:\s*(.+)/,
+      );
       if (timeMatch && msgMatch) {
-        errors.push({ time: timeMatch[1], message: msgMatch[1].substring(0, 120) });
+        errors.push({
+          time: timeMatch[1],
+          message: msgMatch[1].substring(0, 120),
+        });
       }
     }
   } catch {}
@@ -343,7 +472,14 @@ function getMicrosoftStatus(): {
 } {
   const credsPath = path.join(os.homedir(), '.outlook-mcp', 'credentials.json');
   if (!fs.existsSync(credsPath)) {
-    return { connected: false, account: null, name: null, services: [], tokenExpiry: null, tokenValid: false };
+    return {
+      connected: false,
+      account: null,
+      name: null,
+      services: [],
+      tokenExpiry: null,
+      tokenValid: false,
+    };
   }
 
   try {
@@ -355,26 +491,54 @@ function getMicrosoftStatus(): {
 
     for (const scope of scopeList) {
       const perm = scope.split('/').pop() || scope;
-      if (scope.includes('Mail.')) { (svcMap['Mail'] ??= []).push(perm); }
-      else if (scope.includes('Calendars.')) { (svcMap['Calendar'] ??= []).push(perm); }
-      else if (scope.includes('Contacts.')) { (svcMap['Contacts'] ??= []).push(perm); }
-      else if (scope.includes('Files.')) { (svcMap['OneDrive'] ??= []).push(perm); }
-      else if (scope.includes('User.')) { (svcMap['User Profile'] ??= []).push(perm); }
-      else if (scope.includes('Teams.') || scope.includes('Chat.')) { (svcMap['Teams'] ??= []).push(perm); }
+      if (scope.includes('Mail.')) {
+        (svcMap['Mail'] ??= []).push(perm);
+      } else if (scope.includes('Calendars.')) {
+        (svcMap['Calendar'] ??= []).push(perm);
+      } else if (scope.includes('Contacts.')) {
+        (svcMap['Contacts'] ??= []).push(perm);
+      } else if (scope.includes('Files.')) {
+        (svcMap['OneDrive'] ??= []).push(perm);
+      } else if (scope.includes('User.')) {
+        (svcMap['User Profile'] ??= []).push(perm);
+      } else if (scope.includes('Teams.') || scope.includes('Chat.')) {
+        (svcMap['Teams'] ??= []).push(perm);
+      }
     }
 
-    const services = Object.entries(svcMap).map(([n, p]) => ({ name: n, permissions: p }));
+    const services = Object.entries(svcMap).map(([n, p]) => ({
+      name: n,
+      permissions: p,
+    }));
     const expiryStr = creds.expiresOn || creds.expires_at || null;
     const expiryDate = expiryStr ? new Date(expiryStr) : null;
     const tokenValid = expiryDate ? expiryDate.getTime() > Date.now() : false;
 
-    return { connected: true, account, name, services, tokenExpiry: expiryDate?.toISOString() || null, tokenValid };
+    return {
+      connected: true,
+      account,
+      name,
+      services,
+      tokenExpiry: expiryDate?.toISOString() || null,
+      tokenValid,
+    };
   } catch {
-    return { connected: false, account: null, name: null, services: [], tokenExpiry: null, tokenValid: false };
+    return {
+      connected: false,
+      account: null,
+      name: null,
+      services: [],
+      tokenExpiry: null,
+      tokenValid: false,
+    };
   }
 }
 
-function getNanoClawUpdate(): { available: boolean; current: string | null; latest: string | null } {
+function getNanoClawUpdate(): {
+  available: boolean;
+  current: string | null;
+  latest: string | null;
+} {
   try {
     const pkgPath = path.resolve(PROJECT_ROOT, 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
@@ -405,12 +569,40 @@ function getNanoClawUpdate(): { available: boolean; current: string | null; late
 
 const EMPTY_DATA = {
   service: { running: false, pid: null, uptime: null },
-  update: { available: false, current: null as string | null, latest: null as string | null },
-  google: { connected: false, account: null as string | null, scopes: [] as string[], tokenExpiry: null as string | null, tokenValid: false },
-  microsoft: { connected: false, account: null as string | null, name: null as string | null, services: [] as any[], tokenExpiry: null as string | null, tokenValid: false },
-  notion: { connected: false, workspace: null as string | null, botName: null as string | null, pageCount: null as number | null },
+  update: {
+    available: false,
+    current: null as string | null,
+    latest: null as string | null,
+  },
+  google: {
+    connected: false,
+    account: null as string | null,
+    scopes: [] as string[],
+    tokenExpiry: null as string | null,
+    tokenValid: false,
+  },
+  microsoft: {
+    connected: false,
+    account: null as string | null,
+    name: null as string | null,
+    services: [] as any[],
+    tokenExpiry: null as string | null,
+    tokenValid: false,
+  },
+  notion: {
+    connected: false,
+    workspace: null as string | null,
+    botName: null as string | null,
+    pageCount: null as number | null,
+  },
   recentErrors: [] as Array<{ time: string; message: string }>,
-  channels: [] as Array<{ name: string; connected: boolean; lastEvent: string | null; lastEventTime: string | null; account: string | null }>,
+  channels: [] as Array<{
+    name: string;
+    connected: boolean;
+    lastEvent: string | null;
+    lastEventTime: string | null;
+    account: string | null;
+  }>,
   groups: [],
   groupFolders: [],
   tasks: [],
@@ -428,7 +620,19 @@ const EMPTY_DATA = {
 
 function apiData() {
   const db = getDb();
-  if (!db) return { ...EMPTY_DATA, update: getNanoClawUpdate(), google: getGoogleStatus(), microsoft: getMicrosoftStatus(), notion: getNotionStatus(), recentErrors: getRecentErrors(), channels: getChannelStatus(), containers: getContainers(), service: getServiceStatus(), timestamp: new Date().toISOString() };
+  if (!db)
+    return {
+      ...EMPTY_DATA,
+      update: getNanoClawUpdate(),
+      google: getGoogleStatus(),
+      microsoft: getMicrosoftStatus(),
+      notion: getNotionStatus(),
+      recentErrors: getRecentErrors(),
+      channels: getChannelStatus(),
+      containers: getContainers(),
+      service: getServiceStatus(),
+      timestamp: new Date().toISOString(),
+    };
 
   const groups = db
     .prepare(
@@ -480,7 +684,12 @@ function apiData() {
          SUM(CASE WHEN timestamp > datetime('now', '-7 days') THEN 1 ELSE 0 END) as last_7d
        FROM messages`,
     )
-    .get() as { total: number; last_hour: number; last_24h: number; last_7d: number };
+    .get() as {
+    total: number;
+    last_hour: number;
+    last_24h: number;
+    last_7d: number;
+  };
 
   // Message volume by hour (last 24h)
   const hourlyVolume = db
