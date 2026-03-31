@@ -530,7 +530,10 @@ export class WhatsAppChannel implements Channel {
     participant?: string,
   ): Promise<void> {
     if (!this.connected) {
-      logger.warn({ jid, messageId, emoji }, 'WA disconnected, reaction dropped');
+      logger.warn(
+        { jid, messageId, emoji },
+        'WA disconnected, reaction dropped',
+      );
       return;
     }
     try {
