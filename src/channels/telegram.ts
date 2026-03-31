@@ -278,11 +278,7 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async sendImage(
-    jid: string,
-    image: Buffer,
-    caption?: string,
-  ): Promise<void> {
+  async sendImage(jid: string, image: Buffer, caption?: string): Promise<void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;

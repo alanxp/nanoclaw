@@ -390,11 +390,7 @@ export class WhatsAppChannel implements Channel {
     }
   }
 
-  async sendImage(
-    jid: string,
-    image: Buffer,
-    caption?: string,
-  ): Promise<void> {
+  async sendImage(jid: string, image: Buffer, caption?: string): Promise<void> {
     const prefixedCaption = caption
       ? ASSISTANT_HAS_OWN_NUMBER
         ? caption

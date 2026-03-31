@@ -29,7 +29,10 @@ export async function generateImage(
     body.image_size = options.imageSize;
   }
 
-  logger.info({ model, promptLength: prompt.length }, 'Generating image via FAL.AI');
+  logger.info(
+    { model, promptLength: prompt.length },
+    'Generating image via FAL.AI',
+  );
 
   const response = await fetch(url, {
     method: 'POST',
@@ -45,7 +48,7 @@ export async function generateImage(
     throw new Error(`FAL.AI API error (${response.status}): ${errorText}`);
   }
 
-  const result = await response.json() as { images?: Array<{ url: string }> };
+  const result = (await response.json()) as { images?: Array<{ url: string }> };
   const imageUrl = result.images?.[0]?.url;
 
   if (!imageUrl) {
@@ -56,7 +59,9 @@ export async function generateImage(
 
   const imageResponse = await fetch(imageUrl);
   if (!imageResponse.ok) {
-    throw new Error(`Failed to download generated image (${imageResponse.status})`);
+    throw new Error(
+      `Failed to download generated image (${imageResponse.status})`,
+    );
   }
 
   const arrayBuffer = await imageResponse.arrayBuffer();
