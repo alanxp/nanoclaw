@@ -119,6 +119,10 @@ export class WhatsAppChannel implements Channel {
         // Return empty message rather than undefined — prevents indefinite
         // "waiting for this message" when we genuinely don't have the content.
         return proto.Message.fromObject({});
+        // Return undefined so Baileys skips the retry rather than telling
+        // WhatsApp "this message exists but is empty" (which causes permanent
+        // "waiting for this message" on the phone).
+        // return undefined;
       },
     });
 
@@ -213,10 +217,10 @@ export class WhatsAppChannel implements Channel {
 
     this.sock.ev.on('creds.update', saveCreds);
 
-    this.sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+    this.sock.ev.on('lid-mapping.update', ({ lid, pn }) => {
       const lidUser = lid?.split('@')[0].split(':')[0];
-      if (lidUser && jid) {
-        this.setLidPhoneMapping(lidUser, jid);
+      if (lidUser && pn) {
+        this.setLidPhoneMapping(lidUser, pn);
       }
     });
 

@@ -1,0 +1,1176 @@
+import Database from 'better-sqlite3';
+import { createServer } from 'http';
+import { execSync } from 'child_process';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+
+const PROJECT_ROOT = process.cwd();
+const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
+const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+const DB_PATH = path.join(STORE_DIR, 'messages.db');
+const PORT = parseInt(process.env.DASHBOARD_PORT || '3333', 10);
+
+function getDb(): Database.Database | null {
+  if (!fs.existsSync(DB_PATH)) return null;
+  return new Database(DB_PATH, { readonly: true });
+}
+
+function getContainers(): Array<{
+  name: string;
+  status: string;
+  created: string;
+}> {
+  try {
+    const out = execSync(
+      'docker ps --filter "ancestor=nanoclaw-agent:latest" --format "{{.Names}}\\t{{.Status}}\\t{{.CreatedAt}}" 2>/dev/null',
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    return out
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [name, status, created] = line.split('\t');
+        return { name, status, created };
+      });
+  } catch {
+    return [];
+  }
+}
+
+function getServiceStatus(): {
+  running: boolean;
+  pid: number | null;
+  uptime: string | null;
+} {
+  try {
+    const out = execSync(
+      'launchctl list com.nanoclaw 2>/dev/null || echo "not_found"',
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    if (out.includes('not_found')) return { running: false, pid: null, uptime: null };
+    const pidMatch = out.match(/"PID"\s*=\s*(\d+)/);
+    const pid = pidMatch ? parseInt(pidMatch[1], 10) : null;
+    let uptime: string | null = null;
+    if (pid) {
+      try {
+        const elapsed = execSync(`ps -o etime= -p ${pid} 2>/dev/null`, {
+          encoding: 'utf-8',
+          timeout: 3000,
+        }).trim();
+        uptime = elapsed;
+      } catch {
+        /* process may have just died */
+      }
+    }
+    return { running: pid !== null, pid, uptime };
+  } catch {
+    return { running: false, pid: null, uptime: null };
+  }
+}
+
+function getChannelStatus(): Array<{
+  name: string;
+  connected: boolean;
+  lastEvent: string | null;
+  lastEventTime: string | null;
+  account: string | null;
+}> {
+  const LOG_PATH = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
+  const channels = ['whatsapp', 'telegram', 'outlook', 'gmail', 'discord', 'slack'];
+  const status: Record<string, { connected: boolean; lastEvent: string | null; lastEventTime: string | null; account: string | null }> = {};
+  for (const ch of channels) {
+    status[ch] = { connected: false, lastEvent: null, lastEventTime: null, account: null };
+  }
+
+  if (!fs.existsSync(LOG_PATH)) return channels.map(name => ({ name, ...status[name] }));
+
+  try {
+    // Read last 2000 lines of log for channel events
+    const log = execSync(`tail -2000 ${JSON.stringify(LOG_PATH)} 2>/dev/null`, {
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+
+    const lines = log.split('\n');
+    for (const line of lines) {
+      const timeMatch = line.match(/\[(\d{2}:\d{2}:\d{2}\.\d{3})\]/);
+      const time = timeMatch ? timeMatch[1] : null;
+
+      const lineLower = line.toLowerCase();
+
+      // Channel-specific connect patterns
+      const connectPatterns: Record<string, string[]> = {
+        whatsapp: ['connected to whatsapp', 'whatsapp channel connected'],
+        telegram: ['telegram bot connected', 'telegram channel connected'],
+        outlook: ['outlook channel connected'],
+        gmail: ['gmail channel connected'],
+        discord: ['discord channel connected', 'discord bot connected'],
+        slack: ['slack channel connected'],
+      };
+      const stopPatterns: Record<string, string[]> = {
+        whatsapp: ['whatsapp channel stopped', 'whatsapp disconnected', 'connection closed'],
+        telegram: ['telegram channel stopped', 'telegram bot stopped'],
+        outlook: ['outlook channel stopped'],
+        gmail: ['gmail channel stopped'],
+        discord: ['discord channel stopped'],
+        slack: ['slack channel stopped'],
+      };
+
+      for (const ch of channels) {
+        if (connectPatterns[ch]?.some(p => lineLower.includes(p))) {
+          status[ch] = { connected: true, lastEvent: 'connected', lastEventTime: time, account: status[ch].account };
+        } else if (stopPatterns[ch]?.some(p => lineLower.includes(p))) {
+          status[ch] = { connected: false, lastEvent: 'stopped', lastEventTime: time, account: status[ch].account };
+        } else if (lineLower.includes(ch.toLowerCase()) && (lineLower.includes('delivered') || lineLower.includes('message sent') || lineLower.includes('message stored'))) {
+          // Any message activity proves the channel is connected
+          status[ch].connected = true;
+          status[ch].lastEvent = 'active';
+          status[ch].lastEventTime = time;
+        }
+      }
+    }
+  } catch {
+    /* log read failed */
+  }
+
+  // Extract account identities from logs (use last match = most recent)
+  try {
+    const logPath = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
+    if (fs.existsSync(logPath)) {
+      const logTail = execSync(`tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+
+      // Helper: find last match in string
+      const lastMatch = (text: string, re: RegExp): RegExpMatchArray | null => {
+        const matches = [...text.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))];
+        return matches.length > 0 ? matches[matches.length - 1] : null;
+      };
+
+      // Telegram: @BotUsername
+      const tgMatch = lastMatch(logTail, /Telegram bot: @(\S+)/);
+      if (tgMatch) status['telegram'].account = `@${tgMatch[1]}`;
+
+      // Outlook: email from connection log
+      const olMatch = lastMatch(logTail, /Outlook channel connected[\s\S]*?email.*?:\s*"([^"]+)"/);
+      if (olMatch) status['outlook'].account = olMatch[1];
+
+      // Gmail: email from connection log
+      const gmMatch = lastMatch(logTail, /Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/);
+      if (gmMatch) status['gmail'].account = gmMatch[1];
+
+      // WhatsApp: phone number from connection
+      const waMatch = lastMatch(logTail, /"username":\s*"(\d{10,})"/);
+      if (waMatch) status['whatsapp'].account = `+${waMatch[1]}`;
+    }
+  } catch {
+    /* log parsing failed */
+  }
+
+  // Fall back to .env / credential files for account info
+  try {
+    const envPath2 = path.resolve(PROJECT_ROOT, '.env');
+    const env2 = fs.existsSync(envPath2) ? fs.readFileSync(envPath2, 'utf-8') : '';
+    const msEmail = env2.match(/MS_USER_EMAIL=(.+)/)?.[1]?.trim();
+    if (msEmail && !status['outlook'].account) status['outlook'].account = msEmail;
+  } catch { /* */ }
+
+  try {
+    const gmailCreds = path.join(os.homedir(), '.gmail-mcp', 'credentials.json');
+    if (fs.existsSync(gmailCreds) && !status['gmail'].account) {
+      const creds = JSON.parse(fs.readFileSync(gmailCreds, 'utf-8'));
+      if (creds.email) status['gmail'].account = creds.email;
+    }
+  } catch { /* */ }
+
+  // Also check for .env credentials to determine which channels are configured
+  const envPath = path.resolve(PROJECT_ROOT, '.env');
+  let envContent = '';
+  try { envContent = fs.readFileSync(envPath, 'utf-8'); } catch { /* no .env */ }
+
+  const configured = new Set<string>();
+  if (envContent.includes('MS_TENANT_ID')) configured.add('outlook');
+  if (envContent.includes('TELEGRAM_BOT_TOKEN') || fs.existsSync(path.resolve(PROJECT_ROOT, '.claude/channels/telegram/.env'))) configured.add('telegram');
+  if (fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))) configured.add('gmail');
+  // WhatsApp auth store
+  if (fs.existsSync(path.resolve(PROJECT_ROOT, 'store', 'auth')) || fs.existsSync(path.resolve(PROJECT_ROOT, 'auth_info_baileys'))) configured.add('whatsapp');
+
+  return channels
+    .filter(name => configured.has(name) || status[name].connected || status[name].lastEvent)
+    .map(name => ({ name, ...status[name] }));
+}
+
+function getGoogleStatus(): {
+  connected: boolean;
+  account: string | null;
+  scopes: string[];
+  tokenExpiry: string | null;
+  tokenValid: boolean;
+} {
+  const credsPath = path.join(os.homedir(), '.gmail-mcp', 'credentials.json');
+  if (!fs.existsSync(credsPath)) {
+    return { connected: false, account: null, scopes: [], tokenExpiry: null, tokenValid: false };
+  }
+
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+    const scopeStr = creds.scope || '';
+    const scopes: string[] = [];
+    if (scopeStr.includes('gmail')) scopes.push('Gmail');
+    if (scopeStr.includes('calendar')) scopes.push('Calendar');
+    if (scopeStr.includes('spreadsheets')) scopes.push('Sheets');
+    if (scopeStr.includes('drive')) scopes.push('Drive');
+    if (scopeStr.includes('docs')) scopes.push('Docs');
+
+    const expiryDate = creds.expiry_date ? new Date(creds.expiry_date) : null;
+    const tokenValid = expiryDate ? expiryDate.getTime() > Date.now() : false;
+
+    // Try to get account email from Gmail channel log
+    let account = creds.email || null;
+    if (!account) {
+      try {
+        const logPath = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
+        if (fs.existsSync(logPath)) {
+          const logTail = execSync(`tail -2000 ${JSON.stringify(logPath)} 2>/dev/null`, {
+            encoding: 'utf-8', timeout: 5000,
+          });
+          const matches = [...logTail.matchAll(/Gmail channel connected[\s\S]*?email.*?:\s*"([^"]+)"/g)];
+          if (matches.length > 0) account = matches[matches.length - 1][1];
+        }
+      } catch {}
+    }
+
+    return {
+      connected: !!creds.refresh_token || !!creds.access_token,
+      account,
+      scopes,
+      tokenExpiry: expiryDate ? expiryDate.toISOString() : null,
+      tokenValid,
+    };
+  } catch {
+    return { connected: false, account: null, scopes: [], tokenExpiry: null, tokenValid: false };
+  }
+}
+
+function getNotionStatus(): {
+  connected: boolean;
+  workspace: string | null;
+  botName: string | null;
+  pageCount: number | null;
+} {
+  // Check if NOTION_API_KEY is configured
+  const envPath = path.resolve(PROJECT_ROOT, '.env');
+  let notionKey: string | null = null;
+  try {
+    const envContent = fs.readFileSync(envPath, 'utf-8');
+    const match = envContent.match(/NOTION_API_KEY=(\S+)/);
+    if (match) notionKey = match[1];
+  } catch {}
+
+  if (!notionKey) return { connected: false, workspace: null, botName: null, pageCount: null };
+
+  // Test the key by calling /v1/users/me
+  try {
+    const meResult = execSync(
+      `curl -s https://api.notion.com/v1/users/me -H "Authorization: Bearer ${notionKey}" -H "Notion-Version: 2022-06-28"`,
+      { encoding: 'utf-8', timeout: 8000 },
+    );
+    const me = JSON.parse(meResult);
+    if (me.object !== 'user') return { connected: false, workspace: null, botName: null, pageCount: null };
+
+    const workspace = me.bot?.workspace_name || null;
+    const botName = me.name || null;
+
+    // Get page count
+    let pageCount: number | null = null;
+    try {
+      const searchResult = execSync(
+        `curl -s https://api.notion.com/v1/search -H "Authorization: Bearer ${notionKey}" -H "Notion-Version: 2022-06-28" -H "Content-Type: application/json" -d '{"page_size":1}'`,
+        { encoding: 'utf-8', timeout: 8000 },
+      );
+      const search = JSON.parse(searchResult);
+      // has_more tells us there's more than 1, but we can't get exact count easily
+      // Do a larger search to estimate
+      const fullSearch = execSync(
+        `curl -s https://api.notion.com/v1/search -H "Authorization: Bearer ${notionKey}" -H "Notion-Version: 2022-06-28" -H "Content-Type: application/json" -d '{"page_size":100}'`,
+        { encoding: 'utf-8', timeout: 8000 },
+      );
+      const full = JSON.parse(fullSearch);
+      pageCount = full.results?.length || 0;
+      if (full.has_more) pageCount = pageCount + '+' as any; // will render as "100+"
+    } catch {}
+
+    return { connected: true, workspace, botName, pageCount };
+  } catch {
+    return { connected: false, workspace: null, botName: null, pageCount: null };
+  }
+}
+
+function getRecentErrors(): Array<{ time: string; message: string }> {
+  const errors: Array<{ time: string; message: string }> = [];
+  const logPath = path.resolve(PROJECT_ROOT, 'logs', 'nanoclaw.log');
+  if (!fs.existsSync(logPath)) return errors;
+
+  try {
+    const tail = execSync(`tail -1000 ${JSON.stringify(logPath)} 2>/dev/null`, {
+      encoding: 'utf-8', timeout: 5000,
+    });
+    for (const line of tail.split('\n')) {
+      if (!line.includes('ERROR') && !line.includes('WARN')) continue;
+      const timeMatch = line.match(/\[(\d{2}:\d{2}:\d{2}\.\d{3})\]/);
+      // Strip ANSI codes
+      const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
+      const msgMatch = clean.match(/(?:ERROR|WARN)\s*(?:\([^)]*\))?\s*:\s*(.+)/);
+      if (timeMatch && msgMatch) {
+        errors.push({ time: timeMatch[1], message: msgMatch[1].substring(0, 120) });
+      }
+    }
+  } catch {}
+
+  return errors.slice(-10);
+}
+
+function getMicrosoftStatus(): {
+  connected: boolean;
+  account: string | null;
+  name: string | null;
+  services: Array<{ name: string; permissions: string[] }>;
+  tokenExpiry: string | null;
+  tokenValid: boolean;
+} {
+  const credsPath = path.join(os.homedir(), '.outlook-mcp', 'credentials.json');
+  if (!fs.existsSync(credsPath)) {
+    return { connected: false, account: null, name: null, services: [], tokenExpiry: null, tokenValid: false };
+  }
+
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+    const account = creds.account?.username || null;
+    const name = creds.account?.name || null;
+    const scopeList: string[] = creds.scopes || [];
+    const svcMap: Record<string, string[]> = {};
+
+    for (const scope of scopeList) {
+      const perm = scope.split('/').pop() || scope;
+      if (scope.includes('Mail.')) { (svcMap['Mail'] ??= []).push(perm); }
+      else if (scope.includes('Calendars.')) { (svcMap['Calendar'] ??= []).push(perm); }
+      else if (scope.includes('Contacts.')) { (svcMap['Contacts'] ??= []).push(perm); }
+      else if (scope.includes('Files.')) { (svcMap['OneDrive'] ??= []).push(perm); }
+      else if (scope.includes('User.')) { (svcMap['User Profile'] ??= []).push(perm); }
+      else if (scope.includes('Teams.') || scope.includes('Chat.')) { (svcMap['Teams'] ??= []).push(perm); }
+    }
+
+    const services = Object.entries(svcMap).map(([n, p]) => ({ name: n, permissions: p }));
+    const expiryStr = creds.expiresOn || creds.expires_at || null;
+    const expiryDate = expiryStr ? new Date(expiryStr) : null;
+    const tokenValid = expiryDate ? expiryDate.getTime() > Date.now() : false;
+
+    return { connected: true, account, name, services, tokenExpiry: expiryDate?.toISOString() || null, tokenValid };
+  } catch {
+    return { connected: false, account: null, name: null, services: [], tokenExpiry: null, tokenValid: false };
+  }
+}
+
+function getNanoClawUpdate(): { available: boolean; current: string | null; latest: string | null } {
+  try {
+    const pkgPath = path.resolve(PROJECT_ROOT, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const current = pkg.version || null;
+
+    // Check npm registry for latest version
+    const latest = execSync('npm view nanoclaw version 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+
+    return {
+      available: !!(latest && current && latest !== current),
+      current,
+      latest: latest || null,
+    };
+  } catch {
+    // Fallback: just report current version
+    try {
+      const pkgPath = path.resolve(PROJECT_ROOT, 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      return { available: false, current: pkg.version || null, latest: null };
+    } catch {
+      return { available: false, current: null, latest: null };
+    }
+  }
+}
+
+const EMPTY_DATA = {
+  service: { running: false, pid: null, uptime: null },
+  update: { available: false, current: null as string | null, latest: null as string | null },
+  google: { connected: false, account: null as string | null, scopes: [] as string[], tokenExpiry: null as string | null, tokenValid: false },
+  microsoft: { connected: false, account: null as string | null, name: null as string | null, services: [] as any[], tokenExpiry: null as string | null, tokenValid: false },
+  notion: { connected: false, workspace: null as string | null, botName: null as string | null, pageCount: null as number | null },
+  recentErrors: [] as Array<{ time: string; message: string }>,
+  channels: [] as Array<{ name: string; connected: boolean; lastEvent: string | null; lastEventTime: string | null; account: string | null }>,
+  groups: [],
+  groupFolders: [],
+  tasks: [],
+  recentRuns: [],
+  chats: [],
+  messageStats: { total: 0, last_hour: 0, last_24h: 0, last_7d: 0 },
+  hourlyVolume: [],
+  dailyVolume: [],
+  monthDailyVolume: [],
+  weeklyVolume: [],
+  channelStats: [],
+  containers: [],
+  timestamp: new Date().toISOString(),
+};
+
+function apiData() {
+  const db = getDb();
+  if (!db) return { ...EMPTY_DATA, update: getNanoClawUpdate(), google: getGoogleStatus(), microsoft: getMicrosoftStatus(), notion: getNotionStatus(), recentErrors: getRecentErrors(), channels: getChannelStatus(), containers: getContainers(), service: getServiceStatus(), timestamp: new Date().toISOString() };
+
+  const groups = db
+    .prepare(
+      `SELECT jid, name, folder, trigger_pattern, added_at, requires_trigger, is_main
+       FROM registered_groups ORDER BY is_main DESC, name`,
+    )
+    .all() as Array<{
+    jid: string;
+    name: string;
+    folder: string;
+    trigger_pattern: string;
+    added_at: string;
+    requires_trigger: number;
+    is_main: number;
+  }>;
+
+  const tasks = db
+    .prepare(
+      `SELECT id, group_folder, chat_jid, prompt, schedule_type, schedule_value,
+              context_mode, next_run, last_run, last_result, status, created_at
+       FROM scheduled_tasks ORDER BY status, next_run`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  const recentRuns = db
+    .prepare(
+      `SELECT trl.task_id, trl.run_at, trl.duration_ms, trl.status, trl.error,
+              st.prompt, st.group_folder
+       FROM task_run_logs trl
+       LEFT JOIN scheduled_tasks st ON trl.task_id = st.id
+       ORDER BY trl.run_at DESC LIMIT 25`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  const chats = db
+    .prepare(
+      `SELECT jid, name, last_message_time, channel, is_group
+       FROM chats WHERE jid != '__group_sync__'
+       ORDER BY last_message_time DESC LIMIT 30`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  const messageStats = db
+    .prepare(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN timestamp > datetime('now', '-1 hour') THEN 1 ELSE 0 END) as last_hour,
+         SUM(CASE WHEN timestamp > datetime('now', '-24 hours') THEN 1 ELSE 0 END) as last_24h,
+         SUM(CASE WHEN timestamp > datetime('now', '-7 days') THEN 1 ELSE 0 END) as last_7d
+       FROM messages`,
+    )
+    .get() as { total: number; last_hour: number; last_24h: number; last_7d: number };
+
+  // Message volume by hour (last 24h)
+  const hourlyVolume = db
+    .prepare(
+      `SELECT strftime('%H', timestamp) as hour, COUNT(*) as count
+       FROM messages
+       WHERE timestamp > datetime('now', '-24 hours')
+       GROUP BY hour ORDER BY hour`,
+    )
+    .all() as Array<{ hour: string; count: number }>;
+
+  // Message volume by day (last 7 days)
+  const dailyVolume = db
+    .prepare(
+      `SELECT strftime('%w', timestamp) as dow, strftime('%Y-%m-%d', timestamp) as day, COUNT(*) as count
+       FROM messages
+       WHERE timestamp > datetime('now', '-7 days')
+       GROUP BY day ORDER BY day`,
+    )
+    .all() as Array<{ dow: string; day: string; count: number }>;
+
+  // Message volume by day (last month)
+  const monthDailyVolume = db
+    .prepare(
+      `SELECT strftime('%Y-%m-%d', timestamp) as day, COUNT(*) as count
+       FROM messages
+       WHERE timestamp > datetime('now', '-1 month')
+       GROUP BY day ORDER BY day`,
+    )
+    .all() as Array<{ day: string; count: number }>;
+
+  // Message volume by week (last 3 months)
+  const weeklyVolume = db
+    .prepare(
+      `SELECT strftime('%Y-%W', timestamp) as week, COUNT(*) as count
+       FROM messages
+       WHERE timestamp > datetime('now', '-3 months')
+       GROUP BY week ORDER BY week`,
+    )
+    .all() as Array<{ week: string; count: number }>;
+
+  // Messages by channel
+  const channelStats = db
+    .prepare(
+      `SELECT c.channel, COUNT(m.id) as count
+       FROM messages m
+       JOIN chats c ON m.chat_jid = c.jid
+       WHERE m.timestamp > datetime('now', '-24 hours')
+       GROUP BY c.channel`,
+    )
+    .all() as Array<{ channel: string; count: number }>;
+
+  // Group folder disk usage
+  const groupFolders: Array<{ folder: string; exists: boolean }> = [];
+  for (const g of groups) {
+    const folderPath = path.join(GROUPS_DIR, g.folder);
+    groupFolders.push({ folder: g.folder, exists: fs.existsSync(folderPath) });
+  }
+
+  const containers = getContainers();
+  const service = getServiceStatus();
+  const channels = getChannelStatus();
+
+  db.close();
+
+  const update = getNanoClawUpdate();
+  const google = getGoogleStatus();
+  const microsoft = getMicrosoftStatus();
+  const notion = getNotionStatus();
+  const recentErrors = getRecentErrors();
+
+  return {
+    service,
+    update,
+    google,
+    microsoft,
+    notion,
+    recentErrors,
+    channels,
+    groups,
+    groupFolders,
+    tasks,
+    recentRuns,
+    chats,
+    messageStats,
+    hourlyVolume,
+    dailyVolume,
+    monthDailyVolume,
+    weeklyVolume,
+    channelStats,
+    containers,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+const HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NanoClaw Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface2: #1a1a26;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --text2: #8888a0;
+    --accent: #6c5ce7;
+    --accent2: #a29bfe;
+    --green: #00b894;
+    --red: #ff6b6b;
+    --orange: #fdcb6e;
+    --blue: #74b9ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--accent2);
+    letter-spacing: 1px;
+  }
+  header h1 span { color: var(--text2); font-weight: 400; }
+  #status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 8px;
+    animation: pulse 2s infinite;
+  }
+  #status-dot.on { background: var(--green); }
+  #status-dot.off { background: var(--red); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .meta { color: var(--text2); font-size: 12px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text2);
+    margin-bottom: 12px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-value { color: var(--accent2); font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-green { background: rgba(0,184,148,0.15); color: var(--green); }
+  .badge-red { background: rgba(255,107,107,0.15); color: var(--red); }
+  .badge-orange { background: rgba(253,203,110,0.15); color: var(--orange); }
+  .badge-blue { background: rgba(116,185,255,0.15); color: var(--blue); }
+  .badge-purple { background: rgba(108,92,231,0.15); color: var(--accent2); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  th {
+    text-align: left;
+    color: var(--text2);
+    font-weight: 500;
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td {
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  .truncate {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wide { grid-column: 1 / -1; }
+  .bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 60px;
+    padding-top: 8px;
+  }
+  .bar {
+    flex: 1;
+    background: var(--accent);
+    border-radius: 2px 2px 0 0;
+    min-height: 2px;
+    position: relative;
+    transition: background 0.2s;
+  }
+  .bar:hover { background: var(--accent2); }
+  .bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text2);
+    margin-top: 8px;
+  }
+  .channel-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .channel-pill {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--surface2);
+    font-size: 12px;
+  }
+  .channel-pill .count {
+    color: var(--accent2);
+    font-weight: 600;
+  }
+  code {
+    background: var(--surface2);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .update-banner {
+    background: rgba(253,203,110,0.1);
+    border: 1px solid var(--orange);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: var(--orange);
+  }
+  .empty { color: var(--text2); font-style: italic; font-size: 13px; padding: 12px 0; }
+  .time-ago { color: var(--text2); }
+  @media (max-width: 768px) {
+    .grid { grid-template-columns: 1fr; }
+    body { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="status-dot" class="off"></span>NANOCLAW <span>DASHBOARD</span></h1>
+  <div class="meta">
+    <span id="last-update"></span>
+    &middot; auto-refresh 10s
+  </div>
+</header>
+
+<div id="update-banner"></div>
+<div class="grid" id="top-stats"></div>
+<div id="activity-bar"></div>
+<div class="grid" id="main-content"></div>
+
+<script>
+const API = '/api/data';
+let data = null;
+
+function timeAgo(iso) {
+  if (!iso) return 'never';
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24);
+  return d + 'd ago';
+}
+
+function badge(text, color) {
+  return '<span class="badge badge-' + color + '">' + text + '</span>';
+}
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function channelIcon(ch) {
+  const icons = { whatsapp: '💬', telegram: '✈️', gmail: '📧', outlook: '📮', discord: '🎮', slack: '🔷' };
+  return icons[ch] || '📡';
+}
+
+function statusBadge(s) {
+  if (s === 'active') return badge('active', 'green');
+  if (s === 'paused') return badge('paused', 'orange');
+  if (s === 'completed') return badge('done', 'blue');
+  if (s === 'success') return badge('ok', 'green');
+  if (s === 'error') return badge('err', 'red');
+  return badge(s, 'purple');
+}
+
+function renderTopStats() {
+  const d = data;
+  const svc = d.service;
+  document.getElementById('status-dot').className = svc.running ? 'on' : 'off';
+
+  // Update banner
+  if (d.update && d.update.available) {
+    document.getElementById('update-banner').innerHTML =
+      '<div class="update-banner">Update available: <strong>v' + esc(d.update.latest) + '</strong> (current: v' + esc(d.update.current) + '). Run: <code>git pull && npm run build</code></div>';
+  } else if (d.update && d.update.current) {
+    document.getElementById('update-banner').innerHTML = '';
+  }
+
+  let html = '';
+
+  // === ROW 1: Service, Channels, Token Health, Recent Errors ===
+
+  // Service
+  html += '<div class="card"><h2>Service</h2>';
+  html += '<div class="stat-row"><span>Status</span><span class="stat-value">' + (svc.running ? '🟢 Running' : '🔴 Stopped') + '</span></div>';
+  if (svc.pid) html += '<div class="stat-row"><span>PID</span><span class="stat-value">' + svc.pid + '</span></div>';
+  if (svc.uptime) html += '<div class="stat-row"><span>Uptime</span><span class="stat-value">' + svc.uptime + '</span></div>';
+  if (d.update && d.update.current) html += '<div class="stat-row"><span>Version</span><span class="stat-value">v' + esc(d.update.current) + '</span></div>';
+  html += '<div class="stat-row"><span>Containers</span><span class="stat-value">' + d.containers.length + ' / 5</span></div>';
+  html += '</div>';
+
+  // Channels
+  html += '<div class="card"><h2>Channels</h2>';
+  if (d.channels.length === 0) {
+    html += '<div class="empty">No channels configured</div>';
+  } else {
+    d.channels.forEach(ch => {
+      const icon = channelIcon(ch.name);
+      const connBadge = ch.connected ? badge('connected', 'green') : badge('disconnected', 'red');
+      const acct = ch.account ? '<br><span class="time-ago" style="font-size:11px">' + esc(ch.account) + '</span>' : '';
+      html += '<div class="stat-row" style="align-items:flex-start"><span>' + icon + ' ' + esc(ch.name) + acct + '</span><span>' + connBadge + '</span></div>';
+    });
+  }
+  html += '</div>';
+
+  // Token Health
+  html += '<div class="card"><h2>Token Health</h2>';
+  const tokens = [];
+  if (d.google && d.google.connected) {
+    const hoursLeft = d.google.tokenExpiry ? Math.floor((new Date(d.google.tokenExpiry).getTime() - Date.now()) / 3600000) : null;
+    tokens.push({ name: 'Google', valid: d.google.tokenValid, expiry: d.google.tokenExpiry, hoursLeft });
+  }
+  if (d.microsoft && d.microsoft.connected) {
+    const hoursLeft = d.microsoft.tokenExpiry ? Math.floor((new Date(d.microsoft.tokenExpiry).getTime() - Date.now()) / 3600000) : null;
+    tokens.push({ name: 'Microsoft', valid: d.microsoft.tokenValid, expiry: d.microsoft.tokenExpiry, hoursLeft });
+  }
+  if (tokens.length === 0) {
+    html += '<div class="empty">No tokens to monitor</div>';
+  } else {
+    tokens.forEach(t => {
+      let status;
+      if (!t.valid) status = badge('expired', 'red');
+      else if (t.hoursLeft !== null && t.hoursLeft < 2) status = badge('expiring soon', 'orange');
+      else if (t.hoursLeft !== null && t.hoursLeft < 24) status = badge('< 24h', 'orange');
+      else status = badge('healthy', 'green');
+      html += '<div class="stat-row"><span>' + esc(t.name) + '</span><span>' + status + '</span></div>';
+    });
+  }
+  html += '</div>';
+
+  // Recent Errors
+  html += '<div class="card"><h2>Recent Errors</h2>';
+  if (!d.recentErrors || d.recentErrors.length === 0) {
+    html += '<div class="stat-row"><span>' + badge('all clear', 'green') + '</span><span class="time-ago">No recent errors</span></div>';
+  } else {
+    d.recentErrors.slice(-5).forEach(e => {
+      html += '<div class="stat-row" style="font-size:11px;gap:8px"><span class="time-ago" style="white-space:nowrap">' + esc(e.time) + '</span><span style="color:var(--red);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(e.message) + '">' + esc(e.message) + '</span></div>';
+    });
+  }
+  html += '</div>';
+
+  // === ROW 2: Messages, Google, Microsoft, Notion ===
+
+  // Messages
+  html += '<div class="card"><h2>Messages</h2>';
+  html += '<div class="stat-row"><span>Last hour</span><span class="stat-value">' + (d.messageStats.last_hour||0) + '</span></div>';
+  html += '<div class="stat-row"><span>Last 24h</span><span class="stat-value">' + (d.messageStats.last_24h||0) + '</span></div>';
+  html += '<div class="stat-row"><span>Last 7d</span><span class="stat-value">' + (d.messageStats.last_7d||0) + '</span></div>';
+  html += '<div class="stat-row"><span>Total</span><span class="stat-value">' + (d.messageStats.total||0).toLocaleString() + '</span></div>';
+  html += '</div>';
+
+  // Google
+  html += '<div class="card"><h2>Google</h2>';
+  const g = d.google;
+  if (g.connected) {
+    const tokenBadge = g.tokenValid ? badge('valid', 'green') : badge('expired', 'red');
+    if (g.account) html += '<div class="stat-row"><span>Account</span><span class="stat-value">' + esc(g.account) + '</span></div>';
+    html += '<div class="stat-row"><span>Token</span><span>' + tokenBadge + '</span></div>';
+    if (g.scopes.length > 0) {
+      html += '<div class="stat-row"><span>Services</span><span>' + g.scopes.map(s => badge(s, 'blue')).join(' ') + '</span></div>';
+    }
+    if (g.tokenExpiry) html += '<div class="stat-row"><span>Expires</span><span class="time-ago">' + timeAgo(g.tokenExpiry) + '</span></div>';
+  } else {
+    html += '<div class="empty">Not connected</div>';
+  }
+  html += '</div>';
+
+  // Microsoft
+  html += '<div class="card"><h2>Microsoft 365</h2>';
+  const ms = d.microsoft;
+  if (ms && ms.connected) {
+    const tokenBadge = ms.tokenValid ? badge('valid', 'green') : badge('expired', 'red');
+    if (ms.account) html += '<div class="stat-row"><span>Account</span><span class="stat-value" style="font-size:11px">' + esc(ms.account) + '</span></div>';
+    if (ms.name) html += '<div class="stat-row"><span>Name</span><span class="stat-value">' + esc(ms.name) + '</span></div>';
+    html += '<div class="stat-row"><span>Token</span><span>' + tokenBadge + '</span></div>';
+    if (ms.services && ms.services.length > 0) {
+      html += '<div class="stat-row" style="flex-direction:column;gap:6px"><span>Services</span><div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">';
+      ms.services.forEach(svc => {
+        const perms = svc.permissions.join(', ');
+        html += '<span class="badge badge-blue" title="' + esc(perms) + '">' + esc(svc.name) + '</span>';
+      });
+      html += '</div></div>';
+    }
+    if (ms.tokenExpiry) html += '<div class="stat-row"><span>Expires</span><span class="time-ago">' + timeAgo(ms.tokenExpiry) + '</span></div>';
+  } else {
+    html += '<div class="empty">Not connected</div>';
+  }
+  html += '</div>';
+
+  // Notion
+  html += '<div class="card"><h2>Notion</h2>';
+  const n = d.notion;
+  if (n && n.connected) {
+    if (n.workspace) html += '<div class="stat-row"><span>Workspace</span><span class="stat-value">' + esc(n.workspace) + '</span></div>';
+    if (n.botName) html += '<div class="stat-row"><span>Integration</span><span class="stat-value">' + esc(n.botName) + '</span></div>';
+    html += '<div class="stat-row"><span>Status</span><span>' + badge('connected', 'green') + '</span></div>';
+    if (n.pageCount !== null) html += '<div class="stat-row"><span>Pages</span><span class="stat-value">' + n.pageCount + '</span></div>';
+  } else {
+    html += '<div class="empty">Not connected</div>';
+  }
+  html += '</div>';
+
+  document.getElementById('top-stats').innerHTML = html;
+
+  // Activity charts — 4 panels
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function renderChart(title, data, labelFn, totalLabel) {
+    if (!data || data.length === 0) return '<div class="card"><h2>' + title + '</h2><div class="empty">No data</div></div>';
+    const max = Math.max(...data.map(d => d.count), 1);
+    const total = data.reduce((s, d) => s + d.count, 0);
+    let h = '<div class="card"><h2 style="display:flex;justify-content:space-between">' + title + '<span class="stat-value" style="font-size:13px">' + total.toLocaleString() + ' ' + totalLabel + '</span></h2>';
+    h += '<div class="bar-chart" style="height:100px">';
+    data.forEach(d => {
+      const pct = Math.max((d.count / max) * 100, 2);
+      h += '<div class="bar" style="height:' + pct + '%" title="' + labelFn(d) + ' — ' + d.count + ' msgs"></div>';
+    });
+    h += '</div>';
+    h += '<div class="bar-label">';
+    if (data.length > 0) h += '<span>' + labelFn(data[0]) + '</span>';
+    if (data.length > 1) h += '<span>' + labelFn(data[data.length-1]) + '</span>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // Build 24h data (fill all 24 hours)
+  const hourMap = {};
+  (d.hourlyVolume || []).forEach(h => { hourMap[h.hour] = h.count; });
+  const hourData = [];
+  for (let i = 0; i < 24; i++) {
+    const h = String(i).padStart(2, '0');
+    hourData.push({ key: h, count: hourMap[h] || 0 });
+  }
+
+  let actHtml = '<div class="grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 24px">';
+
+  // 24 Hours
+  actHtml += renderChart('24 Hours', hourData, d => d.key + ':00', 'msgs');
+
+  // Fill all 7 days
+  const dayMap = {};
+  (d.dailyVolume || []).forEach(d => { dayMap[d.day] = d.count; });
+  const weekData = [];
+  for (let i = 6; i >= 0; i--) {
+    const dt = new Date(Date.now() - i * 86400000);
+    const key = dt.toISOString().split('T')[0];
+    weekData.push({ key: dayNames[dt.getDay()], count: dayMap[key] || 0 });
+  }
+  actHtml += renderChart('7 Days', weekData, d => d.key, 'msgs');
+
+  // Fill all 30 days
+  const monthMap = {};
+  (d.monthDailyVolume || []).forEach(d => { monthMap[d.day] = d.count; });
+  const monthData = [];
+  for (let i = 29; i >= 0; i--) {
+    const dt = new Date(Date.now() - i * 86400000);
+    const key = dt.toISOString().split('T')[0];
+    const label = dt.getDate() + ' ' + monthNames[dt.getMonth()];
+    monthData.push({ key: label, count: monthMap[key] || 0 });
+  }
+  actHtml += renderChart('30 Days', monthData, d => d.key, 'msgs');
+
+  // 3 Months
+  actHtml += renderChart('3 Months', d.weeklyVolume || [], d => {
+    const parts = d.week.split('-');
+    return 'W' + (parts[1] || d.week);
+  }, 'msgs');
+
+  actHtml += '</div>';
+
+  // Channel pills
+  if (d.channelStats.length > 0) {
+    actHtml += '<div style="display:flex;gap:8px;margin-bottom:24px;margin-top:-16px">';
+    d.channelStats.forEach(cs => {
+      actHtml += '<span class="channel-pill">' + channelIcon(cs.channel) + ' ' + esc(cs.channel || 'unknown') + ' <span class="count">' + cs.count + ' (24h)</span></span>';
+    });
+    actHtml += '</div>';
+  }
+
+  document.getElementById('activity-bar').innerHTML = actHtml;
+}
+
+function renderMain() {
+  const d = data;
+  let html = '';
+
+  // Groups
+  html += '<div class="card wide"><h2>Groups (' + d.groups.length + ')</h2>';
+  if (d.groups.length === 0) {
+    html += '<div class="empty">No registered groups</div>';
+  } else {
+    html += '<table><tr><th>Name</th><th>Folder</th><th>Channel</th><th>Trigger Required</th><th>Registered</th></tr>';
+    d.groups.forEach(g => {
+      const ch = g.jid.includes('@g.us') || g.jid.includes('@s.whatsapp') ? 'whatsapp'
+        : g.jid.startsWith('tg:') ? 'telegram'
+        : g.jid.startsWith('dc:') ? 'discord'
+        : g.jid.startsWith('sl:') ? 'slack'
+        : g.jid.includes('gmail') ? 'gmail'
+        : g.jid.includes('outlook') ? 'outlook'
+        : '—';
+      const isMain = g.is_main ? ' ' + badge('main', 'purple') : '';
+      const trigger = g.requires_trigger ? badge('yes', 'blue') : badge('no', 'green');
+      html += '<tr><td>' + esc(g.name) + isMain + '</td><td><code>' + esc(g.folder) + '</code></td><td>' + channelIcon(ch) + ' ' + ch + '</td><td>' + trigger + '</td><td class="time-ago">' + timeAgo(g.added_at) + '</td></tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+
+  // Scheduled Tasks
+  html += '<div class="card wide"><h2>Scheduled Tasks (' + d.tasks.length + ')</h2>';
+  if (d.tasks.length === 0) {
+    html += '<div class="empty">No scheduled tasks</div>';
+  } else {
+    html += '<table><tr><th style="width:40%">Task</th><th>Schedule</th><th>Group</th><th>Status</th><th>Next Run</th><th>Last Run</th></tr>';
+    d.tasks.forEach(t => {
+      // Extract a short label from the prompt (first sentence or first 80 chars)
+      const raw = String(t.prompt || '');
+      const label = raw.split(/[.!\\n]/)[0].substring(0, 80) + (raw.length > 80 ? '...' : '');
+      const sched = esc(t.schedule_value);
+      html += '<tr><td title="' + esc(raw) + '">' + esc(label) + '</td>';
+      html += '<td><code>' + sched + '</code></td>';
+      html += '<td>' + esc(t.group_folder) + '</td>';
+      html += '<td>' + statusBadge(t.status) + '</td>';
+      html += '<td class="time-ago">' + (t.next_run ? timeAgo(t.next_run) : '—') + '</td>';
+      html += '<td class="time-ago">' + (t.last_run ? timeAgo(t.last_run) : 'never') + '</td></tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+
+  // Containers
+  html += '<div class="card wide"><h2>Active Containers (' + d.containers.length + ')</h2>';
+  if (d.containers.length === 0) {
+    html += '<div class="empty">No running containers</div>';
+  } else {
+    html += '<table><tr><th>Name</th><th>Status</th><th>Created</th></tr>';
+    d.containers.forEach(c => {
+      html += '<tr><td>' + esc(c.name) + '</td><td>' + badge('running', 'green') + ' ' + esc(c.status) + '</td><td>' + esc(c.created) + '</td></tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+
+  // Recent Task Runs
+  html += '<div class="card wide"><h2>Recent Task Runs</h2>';
+  if (d.recentRuns.length === 0) {
+    html += '<div class="empty">No task runs yet</div>';
+  } else {
+    html += '<table><tr><th>Time</th><th>Group</th><th>Prompt</th><th>Status</th><th>Duration</th><th>Error</th></tr>';
+    d.recentRuns.forEach(r => {
+      const dur = r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + 's' : '—';
+      html += '<tr><td class="time-ago">' + timeAgo(r.run_at) + '</td>';
+      html += '<td>' + esc(r.group_folder) + '</td>';
+      html += '<td class="truncate" title="' + esc(r.prompt) + '">' + esc(r.prompt) + '</td>';
+      html += '<td>' + statusBadge(r.status) + '</td>';
+      html += '<td>' + dur + '</td>';
+      html += '<td class="truncate">' + (r.error ? esc(r.error) : '—') + '</td></tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+
+  // Recent Chats
+  html += '<div class="card wide"><h2>Recent Chats</h2>';
+  if (d.chats.length === 0) {
+    html += '<div class="empty">No chats yet</div>';
+  } else {
+    html += '<table><tr><th>Name</th><th>Channel</th><th>Type</th><th>Last Activity</th></tr>';
+    d.chats.forEach(c => {
+      const ch = c.channel || '—';
+      const type = c.is_group ? badge('group', 'blue') : badge('dm', 'purple');
+      html += '<tr><td>' + esc(c.name) + '</td><td>' + channelIcon(ch) + ' ' + ch + '</td><td>' + type + '</td><td class="time-ago">' + timeAgo(c.last_message_time) + '</td></tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+
+  document.getElementById('main-content').innerHTML = html;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch(API);
+    data = await res.json();
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+    renderTopStats();
+    renderMain();
+  } catch (e) {
+    console.error('Refresh failed:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>`;
+
+const server = createServer((req, res) => {
+  if (req.url === '/api/data') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    try {
+      res.end(JSON.stringify(apiData()));
+    } catch (err) {
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(HTML);
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`NanoClaw Dashboard: http://localhost:${PORT}`);
+});
