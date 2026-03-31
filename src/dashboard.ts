@@ -973,9 +973,106 @@ const HTML = `<!DOCTYPE html>
   }
   .empty { color: var(--text2); font-style: italic; font-size: 13px; padding: 12px 0; }
   .time-ago { color: var(--text2); }
+  tr.clickable { cursor: pointer; transition: background 0.15s; }
+  tr.clickable:hover { background: var(--surface2); }
+  /* Chat panel */
+  .chat-overlay {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 100;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .chat-overlay.open { opacity: 1; pointer-events: auto; }
+  .chat-panel {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: min(560px, 100vw);
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    z-index: 101;
+    display: flex; flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+  }
+  .chat-panel.open { transform: translateX(0); }
+  .chat-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .chat-header h3 { font-size: 14px; font-weight: 600; color: var(--accent2); }
+  .chat-header .chat-meta { font-size: 11px; color: var(--text2); }
+  .chat-close {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text2); font-size: 18px; cursor: pointer;
+    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .chat-close:hover { background: var(--surface2); color: var(--text); }
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .chat-messages::-webkit-scrollbar { width: 6px; }
+  .chat-messages::-webkit-scrollbar-track { background: transparent; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .msg {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.45;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .msg-in {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .msg-out {
+    align-self: flex-end;
+    background: rgba(108,92,231,0.15);
+    border: 1px solid rgba(108,92,231,0.25);
+    border-bottom-right-radius: 4px;
+  }
+  .msg-sender {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent2);
+    margin-bottom: 2px;
+  }
+  .msg-time {
+    font-size: 10px;
+    color: var(--text2);
+    margin-top: 4px;
+    text-align: right;
+  }
+  .chat-load-more {
+    align-self: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text2);
+    font-size: 12px;
+    padding: 6px 16px;
+    cursor: pointer;
+    margin-bottom: 8px;
+    transition: background 0.15s;
+  }
+  .chat-load-more:hover { background: var(--surface2); color: var(--text); }
+  .chat-empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--text2); font-style: italic; font-size: 13px;
+  }
   @media (max-width: 768px) {
     .grid { grid-template-columns: 1fr; }
     body { padding: 12px; }
+    .chat-panel { width: 100vw; }
   }
 </style>
 </head>
@@ -992,6 +1089,18 @@ const HTML = `<!DOCTYPE html>
 <div class="grid" id="top-stats"></div>
 <div id="activity-bar"></div>
 <div class="grid" id="main-content"></div>
+
+<div class="chat-overlay" id="chat-overlay"></div>
+<div class="chat-panel" id="chat-panel">
+  <div class="chat-header">
+    <div>
+      <h3 id="chat-panel-name">Chat</h3>
+      <div class="chat-meta" id="chat-panel-meta"></div>
+    </div>
+    <button class="chat-close" id="chat-close">&times;</button>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+</div>
 
 <script>
 const API = '/api/data';
@@ -1339,7 +1448,8 @@ function renderMain() {
     d.chats.forEach(c => {
       const ch = c.channel || '—';
       const type = c.is_group ? badge('group', 'blue') : badge('dm', 'purple');
-      html += '<tr><td>' + esc(c.name) + '</td><td>' + channelIcon(ch) + ' ' + ch + '</td><td>' + type + '</td><td class="time-ago">' + timeAgo(c.last_message_time) + '</td></tr>';
+      html += '<tr class="clickable" data-jid="' + esc(c.jid) + '" data-name="' + esc(c.name) + '" data-channel="' + esc(ch) + '" data-group="' + (c.is_group ? '1' : '0') + '">';
+      html += '<td>' + esc(c.name) + '</td><td>' + channelIcon(ch) + ' ' + ch + '</td><td>' + type + '</td><td class="time-ago">' + timeAgo(c.last_message_time) + '</td></tr>';
     });
     html += '</table>';
   }
@@ -1360,19 +1470,184 @@ async function refresh() {
   }
 }
 
+// Chat panel — click delegation
+document.getElementById('main-content').addEventListener('click', function(e) {
+  const row = e.target.closest('tr.clickable[data-jid]');
+  if (!row) return;
+  openChat(row.dataset.jid, row.dataset.name, row.dataset.channel, row.dataset.group === '1');
+});
+
+let chatJid = null;
+let chatMessages = [];
+
+function openChat(jid, name, channel, isGroup) {
+  chatJid = jid;
+  chatMessages = [];
+  document.getElementById('chat-panel-name').textContent = name || jid;
+  document.getElementById('chat-panel-meta').textContent =
+    channelIcon(channel) + ' ' + channel + ' · ' + (isGroup ? 'Group' : 'DM');
+  document.getElementById('chat-overlay').classList.add('open');
+  document.getElementById('chat-panel').classList.add('open');
+  document.getElementById('chat-messages').innerHTML =
+    '<div class="chat-empty">Loading...</div>';
+  loadMessages(jid);
+}
+
+function closeChat() {
+  chatJid = null;
+  chatMessages = [];
+  document.getElementById('chat-overlay').classList.remove('open');
+  document.getElementById('chat-panel').classList.remove('open');
+}
+
+document.getElementById('chat-close').addEventListener('click', closeChat);
+document.getElementById('chat-overlay').addEventListener('click', closeChat);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeChat(); });
+
+async function loadMessages(jid, before) {
+  try {
+    let url = '/api/messages?jid=' + encodeURIComponent(jid) + '&limit=100';
+    if (before) url += '&before=' + encodeURIComponent(before);
+    const res = await fetch(url);
+    const result = await res.json();
+    if (result.error || chatJid !== jid) return;
+
+    if (before) {
+      chatMessages = result.messages.concat(chatMessages);
+    } else {
+      chatMessages = result.messages;
+    }
+    renderChatMessages(result.messages.length >= 100);
+    if (!before) {
+      const el = document.getElementById('chat-messages');
+      el.scrollTop = el.scrollHeight;
+    }
+  } catch (e) {
+    document.getElementById('chat-messages').innerHTML =
+      '<div class="chat-empty">Failed to load messages</div>';
+  }
+}
+
+function renderChatMessages(hasMore) {
+  const el = document.getElementById('chat-messages');
+  if (chatMessages.length === 0) {
+    el.innerHTML = '<div class="chat-empty">No messages in this chat</div>';
+    return;
+  }
+
+  let html = '';
+  if (hasMore) {
+    html += '<button class="chat-load-more" onclick="loadOlder()">Load older messages</button>';
+  }
+
+  let lastDate = '';
+  chatMessages.forEach(m => {
+    const d = new Date(m.timestamp);
+    const dateStr = d.toLocaleDateString();
+    if (dateStr !== lastDate) {
+      lastDate = dateStr;
+      html += '<div style="align-self:center;font-size:11px;color:var(--text2);padding:8px 0 4px;font-weight:500">' + esc(dateStr) + '</div>';
+    }
+
+    const isOut = m.is_from_me || m.is_bot_message;
+    const cls = isOut ? 'msg msg-out' : 'msg msg-in';
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    html += '<div class="' + cls + '">';
+    if (!isOut && m.sender_name) {
+      html += '<div class="msg-sender">' + esc(m.sender_name) + '</div>';
+    }
+    if (isOut && m.is_bot_message) {
+      html += '<div class="msg-sender" style="color:var(--green)">Assistant</div>';
+    }
+    html += '<div>' + esc(m.content) + '</div>';
+    html += '<div class="msg-time">' + time + '</div>';
+    html += '</div>';
+  });
+
+  el.innerHTML = html;
+}
+
+function loadOlder() {
+  if (chatMessages.length > 0 && chatJid) {
+    const oldest = chatMessages[0].timestamp;
+    const scrollEl = document.getElementById('chat-messages');
+    const prevHeight = scrollEl.scrollHeight;
+    loadMessages(chatJid, oldest).then(() => {
+      scrollEl.scrollTop = scrollEl.scrollHeight - prevHeight;
+    });
+  }
+}
+
 refresh();
 setInterval(refresh, 10000);
 </script>
 </body>
 </html>`;
 
+function getChatMessages(
+  jid: string,
+  limit = 100,
+  before?: string,
+): Array<{
+  id: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: number;
+  is_bot_message: number;
+}> {
+  const db = getDb();
+  if (!db) return [];
+  try {
+    const rows = before
+      ? db
+          .prepare(
+            `SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+             FROM messages WHERE chat_jid = ? AND timestamp < ?
+             ORDER BY timestamp DESC LIMIT ?`,
+          )
+          .all(jid, before, limit)
+      : db
+          .prepare(
+            `SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+             FROM messages WHERE chat_jid = ?
+             ORDER BY timestamp DESC LIMIT ?`,
+          )
+          .all(jid, limit);
+    db.close();
+    return (rows as any[]).reverse();
+  } catch {
+    db.close();
+    return [];
+  }
+}
+
 const server = createServer((req, res) => {
-  if (req.url === '/api/data') {
+  const url = new URL(req.url || '/', `http://localhost:${PORT}`);
+
+  if (url.pathname === '/api/data') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     try {
       res.end(JSON.stringify(apiData()));
     } catch (err) {
       res.end(JSON.stringify({ error: String(err) }));
+    }
+  } else if (url.pathname === '/api/messages') {
+    const jid = url.searchParams.get('jid');
+    const limit = parseInt(url.searchParams.get('limit') || '100', 10);
+    const before = url.searchParams.get('before') || undefined;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (!jid) {
+      res.end(JSON.stringify({ error: 'Missing jid parameter' }));
+    } else {
+      try {
+        const messages = getChatMessages(jid, limit, before);
+        res.end(JSON.stringify({ jid, messages }));
+      } catch (err) {
+        res.end(JSON.stringify({ error: String(err) }));
+      }
     }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/html' });
