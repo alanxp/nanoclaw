@@ -47,6 +47,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { generateImage } from './image-generation.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -695,6 +696,19 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    generateAndSendImage: async (jid, prompt, caption, model, imageSize) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      const result = await generateImage(prompt, { model, imageSize });
+      if (channel.sendImage) {
+        await channel.sendImage(jid, result.imageBuffer, caption);
+      } else {
+        await channel.sendMessage(
+          jid,
+          caption ? `${caption}\n${result.url}` : result.url,
+        );
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

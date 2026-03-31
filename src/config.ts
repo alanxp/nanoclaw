@@ -10,6 +10,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'FAL_KEY',
+  'FAL_DEFAULT_MODEL',
 ]);
 
 export const ASSISTANT_NAME =
@@ -80,6 +82,12 @@ export function getTriggerPattern(trigger?: string): RegExp {
 }
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
+
+export const FAL_KEY = process.env.FAL_KEY || envConfig.FAL_KEY || '';
+export const FAL_DEFAULT_MODEL =
+  process.env.FAL_DEFAULT_MODEL ||
+  envConfig.FAL_DEFAULT_MODEL ||
+  'fal-ai/flux-pro/v1.1';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

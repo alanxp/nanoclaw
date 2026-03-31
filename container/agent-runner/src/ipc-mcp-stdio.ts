@@ -63,6 +63,35 @@ server.tool(
 );
 
 server.tool(
+  'generate_image',
+  'Generate an image from a text prompt using AI and send it to the chat. The image is generated asynchronously — it will appear in the chat shortly after you call this tool. You can continue responding while it generates.',
+  {
+    prompt: z.string().describe('Detailed description of the image to generate. Be specific about style, subject, composition, colors, etc.'),
+    caption: z.string().optional().describe('Optional caption to display with the image in the chat'),
+    model: z.string().optional().describe('FAL.AI model ID (default: fal-ai/flux-pro/v1.1). Other options: fal-ai/flux/schnell (fast), fal-ai/flux/dev'),
+    image_size: z.string().optional().describe('Image size preset: "square_hd", "square", "landscape_4_3", "landscape_16_9", "portrait_4_3", "portrait_16_9"'),
+  },
+  async (args) => {
+    const data: Record<string, string | undefined> = {
+      type: 'generate_image',
+      chatJid,
+      prompt: args.prompt,
+      caption: args.caption || undefined,
+      model: args.model || undefined,
+      imageSize: args.image_size || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: 'Image generation requested. It will be sent to the chat when ready.' }],
+    };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

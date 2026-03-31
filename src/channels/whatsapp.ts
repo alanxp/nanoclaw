@@ -390,6 +390,42 @@ export class WhatsAppChannel implements Channel {
     }
   }
 
+  async sendImage(
+    jid: string,
+    image: Buffer,
+    caption?: string,
+  ): Promise<void> {
+    const prefixedCaption = caption
+      ? ASSISTANT_HAS_OWN_NUMBER
+        ? caption
+        : `${ASSISTANT_NAME}: ${caption}`
+      : undefined;
+
+    if (!this.connected) {
+      logger.warn(
+        { jid, size: image.length },
+        'WA disconnected, image cannot be queued — dropping',
+      );
+      return;
+    }
+    try {
+      const sent = await this.sock.sendMessage(jid, {
+        image,
+        caption: prefixedCaption,
+      });
+      if (sent?.key?.id && sent.message) {
+        this.sentMessageCache.set(sent.key.id, sent.message);
+        if (this.sentMessageCache.size > 256) {
+          const oldest = this.sentMessageCache.keys().next().value!;
+          this.sentMessageCache.delete(oldest);
+        }
+      }
+      logger.info({ jid, size: image.length }, 'Image sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send image');
+    }
+  }
+
   isConnected(): boolean {
     return this.connected;
   }
